@@ -316,6 +316,38 @@ describe('HTTP hardening regressions', () => {
   }
 
   for (const framework of ['express', 'fastify'] as const) {
+    it(`${framework} forwards loader cancellation when the final HTTP caller times out`, async () => {
+      const { backend } = controlledCache()
+      const cache = new AdaptiveCache({ backend, compress: false, loadTimeoutMs: 20 })
+      let observedSignal: AbortSignal | undefined
+      let releaseFallback = () => {}
+      const fallback = new Promise<void>((resolve) => {
+        releaseFallback = resolve
+      })
+      const loader = async (_req: unknown, context?: { signal: AbortSignal }) => {
+        observedSignal = context?.signal
+        if (!observedSignal) await fallback
+        else if (!observedSignal.aborted)
+          await new Promise<void>((resolve) => observedSignal?.addEventListener('abort', () => resolve(), { once: true }))
+        return 'late-source'
+      }
+      let status: number
+      if (framework === 'express') {
+        const app = express()
+        app.get('/cancel-source', adaptiveExpressCache({ cache, loader }))
+        status = (await request(app).get('/cancel-source')).status
+      } else {
+        const app = Fastify()
+        await app.register(adaptiveFastifyCache({ cache, loader }))
+        app.get('/cancel-source', async () => 'route')
+        status = (await app.inject('/cancel-source')).statusCode
+        await app.close()
+      }
+      releaseFallback()
+      expect(status).toBe(500)
+      expect(observedSignal?.aborted).toBe(true)
+    })
+
     for (const stage of ['read', 'source'] as const) {
       it(`${framework} bounds a stalled ${stage} and never retries after the load deadline`, async () => {
         const { backend } = controlledCache()

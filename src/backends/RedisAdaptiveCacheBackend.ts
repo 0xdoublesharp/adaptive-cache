@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { Logger } from '../lib/logger'
+import { normalizeCacheTags } from '../tagValidation'
 import {
   AdaptiveCacheBackend,
   AdaptiveCacheBackendFetchInput,
@@ -72,11 +73,15 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   public readonly client: Redis
   private readonly logger: Logger
   private readonly ownsClient: boolean
+  private readonly maxTagCleanupKeys: number
 
-  constructor(client: Redis, logger: Logger, ownsClient = false) {
+  constructor(client: Redis, logger: Logger, ownsClient = false, maxTagCleanupKeys = 10_000) {
+    if (!Number.isSafeInteger(maxTagCleanupKeys) || maxTagCleanupKeys <= 0)
+      throw new RangeError('redis.maxTagCleanupKeys must be a positive safe integer')
     this.client = client
     this.logger = logger
     this.ownsClient = ownsClient
+    this.maxTagCleanupKeys = maxTagCleanupKeys
     this.defineLuaScripts()
   }
 
@@ -164,6 +169,7 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   public async update(input: AdaptiveCacheBackendUpdateInput): Promise<AdaptiveCacheUpdateResult> {
+    const encodedTags = normalizeCacheTags(input.tags, 'Redis cache write').encoded
     const result = await (this.client as unknown as RedisFeatureCommands).adaptiveCacheUpdate(
       input.dataKey,
       input.metaKey,
@@ -176,7 +182,7 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
       input.writeToken || '',
       input.redisPrefix,
       input.key,
-      JSON.stringify(input.tags),
+      encodedTags,
       String(input.staleTTL || 0),
       String(1 - Math.random() * (input.ttlJitter || 0)),
       input.lockKey || '',
@@ -226,12 +232,13 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   public async invalidateTags(tags: string[], redisPrefix: string): Promise<string[]> {
+    const encodedTags = normalizeCacheTags(tags, 'Redis tag invalidation').encoded
     const detached = await (this.client as unknown as RedisFeatureCommands).adaptiveCacheInvalidate(
       '__adaptive:legacy-barrier',
       'tags',
       redisPrefix,
       '',
-      JSON.stringify(tags),
+      encodedTags,
       randomUUID(),
       randomUUID(),
     )
@@ -260,6 +267,7 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     }, 10000)
     renewal.unref()
     const keys = new Set<string>()
+    let processedMemberships = 0
     try {
       for (const snapshot of snapshots) {
         const { tag, indexKey, kind } = snapshot
@@ -278,6 +286,10 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
           if (!members.length && (kind === 'zset' || cursor === '0')) throw incomplete()
           for (let offset = 0; offset < members.length; offset += 100) {
             const batch = members.slice(offset, offset + 100)
+            if (processedMemberships + batch.length > this.maxTagCleanupKeys)
+              throw new Error(
+                `Redis tag invalidation cleanup limit exceeded (${this.maxTagCleanupKeys} key memberships)`,
+              )
             const removed = await (this.client as any).adaptiveCacheCleanup(
               indexKey,
               redisPrefix,
@@ -287,6 +299,7 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
             )
             if (removed < 0 || removed > snapshot.remaining) throw incomplete()
             snapshot.remaining -= removed
+            processedMemberships += batch.length
             batch.forEach((key) => keys.add(key))
           }
         }

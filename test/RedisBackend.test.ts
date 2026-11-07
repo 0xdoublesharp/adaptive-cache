@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import { describe, expect, it, vi } from 'vitest'
+import { AdaptiveCache } from '../src/AdaptiveCache'
 import { RedisAdaptiveCacheBackend } from '../src/backends/RedisAdaptiveCacheBackend'
 import { Logger } from '../src/lib/logger'
 import { FakeRedis } from './helpers/FakeRedis'
@@ -7,6 +8,121 @@ import { FakeRedis } from './helpers/FakeRedis'
 const logger = () => new Logger('silent')
 
 describe('RedisAdaptiveCacheBackend', () => {
+  it.each([0, 1.5, Number.POSITIVE_INFINITY])('rejects invalid direct cleanup limit %s', (limit) => {
+    expect(() => new RedisAdaptiveCacheBackend(new FakeRedis() as any, logger(), false, limit)).toThrow(RangeError)
+  })
+
+  it('passes the configured cleanup limit through AdaptiveCache', async () => {
+    const redis = new FakeRedis()
+    const cache = new AdaptiveCache({ logLevel: 'silent', redis: { maxTagCleanupKeys: 1 } }, redis as any)
+    for (const key of ['one', 'two'])
+      await redis.zadd('adaptive:__adaptive:tag-index:red', Date.now() + 60_000, key)
+
+    try {
+      await expect(cache.invalidateTags(['red'])).rejects.toThrow('cleanup limit')
+    } finally {
+      await cache.close()
+    }
+  })
+
+  it('rejects tag invalidation above its aggregate cleanup limit', async () => {
+    const redis = new FakeRedis()
+    const backend = new (RedisAdaptiveCacheBackend as any)(redis, logger(), false, 2) as RedisAdaptiveCacheBackend
+    const index = 'adaptive:__adaptive:tag-index:red'
+    for (const key of ['one', 'two', 'three']) await redis.zadd(index, Date.now() + 60_000, key)
+
+    await expect(backend.invalidateTags(['red'], 'adaptive:')).rejects.toThrow('cleanup limit')
+  })
+
+  it('counts repeated key memberships across tag snapshots toward the cleanup limit', async () => {
+    const redis = new FakeRedis()
+    const backend = new RedisAdaptiveCacheBackend(redis as any, logger(), false, 3)
+    for (const tag of ['red', 'blue']) {
+      const index = `adaptive:__adaptive:tag-index:${tag}`
+      for (const key of ['one', 'two']) await redis.zadd(index, Date.now() + 60_000, key)
+    }
+
+    await expect(backend.invalidateTags(['red', 'blue'], 'adaptive:')).rejects.toThrow('cleanup limit')
+  })
+
+  it('rejects excessive tag input before invoking invalidation Lua', async () => {
+    const redis = new FakeRedis()
+    const invalidate = vi.spyOn(redis, 'adaptiveCacheInvalidate')
+    const backend = new RedisAdaptiveCacheBackend(redis as any, logger())
+
+    await expect(
+      backend.invalidateTags(Array.from({ length: 1025 }, () => 'tag'), 'adaptive:'),
+    ).rejects.toThrow('at most 1024')
+    expect(invalidate).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { name: 'non-array', tags: 'tag', message: 'array' },
+    { name: 'non-string', tags: [1], message: 'strings' },
+    { name: 'empty', tags: [''], message: 'non-empty' },
+    { name: 'overlong', tags: ['x'.repeat(4097)], message: '4096 bytes' },
+    {
+      name: 'oversized payload',
+      tags: Array.from({ length: 100 }, (_, index) => `${index}:` + 'x'.repeat(3000)),
+      message: 'payload exceeds',
+    },
+  ])('rejects $name tag input before invoking invalidation Lua', async ({ tags, message }) => {
+    const redis = new FakeRedis()
+    const invalidate = vi.spyOn(redis, 'adaptiveCacheInvalidate')
+    const backend = new RedisAdaptiveCacheBackend(redis as any, logger())
+
+    await expect((backend.invalidateTags as any)(tags, 'adaptive:')).rejects.toThrow(message)
+    expect(invalidate).not.toHaveBeenCalled()
+  })
+
+  it('deduplicates tags consistently and rejects invalid tags before writes', async () => {
+    const redis = new FakeRedis()
+    const invalidate = vi.spyOn(redis, 'adaptiveCacheInvalidate')
+    const update = vi.spyOn(redis, 'adaptiveCacheUpdate')
+    const backend = new RedisAdaptiveCacheBackend(redis as any, logger())
+
+    await backend.invalidateTags(['missing', 'missing'], 'adaptive:')
+    expect(invalidate.mock.calls[0][4]).toBe('["missing"]')
+    await backend.update({
+      key: 'valid-tag',
+      dataKey: 'valid-tagdata',
+      metaKey: 'valid-tagmeta',
+      redisPrefix: 'adaptive:',
+      encodedData: 'value',
+      responseHash: 'hash',
+      initialTTL: 5,
+      maxTTL: 60,
+      ttlScaling: 2,
+      metaTTL: 100,
+      tags: ['tag', 'tag'],
+    })
+    expect(update.mock.calls[0][11]).toBe('["tag"]')
+    update.mockClear()
+    await expect(
+      backend.update({
+        key: 'invalid-tag',
+        dataKey: 'invalid-tagdata',
+        metaKey: 'invalid-tagmeta',
+        redisPrefix: 'adaptive:',
+        encodedData: 'value',
+        responseHash: 'hash',
+        initialTTL: 5,
+        maxTTL: 60,
+        ttlScaling: 2,
+        metaTTL: 100,
+        tags: [''],
+      }),
+    ).rejects.toThrow('non-empty')
+    expect(update).not.toHaveBeenCalled()
+  })
+
+  it('does not record refresh success after the Redis lease is absent', async () => {
+    const redis = new FakeRedis()
+    const backend = new RedisAdaptiveCacheBackend(redis as any, logger())
+    expect(await backend.releaseLock('missing-lock', 100, 'owner')).toEqual(['LOCK_MISMATCH', ''])
+    expect(await redis.get('missing-lock')).toBeNull()
+  })
+
   it('should fetch, update, tag, clear, invalidate, and coordinate locks through Redis commands', async () => {
     const redis = new FakeRedis()
     const backend = new RedisAdaptiveCacheBackend(redis as any, logger())

@@ -1,5 +1,7 @@
 import Redis from 'ioredis'
+import { randomUUID } from 'node:crypto'
 import { Logger } from '../lib/logger'
+import { normalizeCacheTags } from '../tagValidation'
 import {
   AdaptiveCacheBackend,
   AdaptiveCacheBackendFetchInput,
@@ -18,10 +20,16 @@ interface ClientState {
   pendingUpdates: Set<Promise<void>>
   hydrations: Set<Promise<unknown>>
   generation: number
+  references: number
 }
 
 // Middleware and temporary invalidators share the same caller-owned client.
-const clientStates = new WeakMap<Redis, ClientState>()
+const clientStates = new WeakMap<Redis, Map<string, ClientState>>()
+const MAX_INVALIDATION_PAYLOAD_BYTES = 256 * 1024
+const MAX_INVALIDATION_KEYS = 1024
+const MAX_INVALIDATION_KEY_BYTES = 4096
+const MAX_PENDING_INVALIDATION_KEYS = 4096
+const INVALIDATION_BATCH_SIZE = 128
 
 export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   public readonly name = 'l1-redis' as const
@@ -32,10 +40,15 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   private readonly logger: Logger
   private readonly writeMode: 'async' | 'await-redis'
   private readonly state: ClientState
-  private readonly sourceId = Math.random().toString(36).slice(2)
+  private readonly stateMap: Map<string, ClientState>
+  private readonly sourceId = randomUUID()
   private readonly channel: string
   private readonly redisPrefix: string
   private subscriber?: Redis
+  private readonly pendingInvalidationKeys = new Set<string>()
+  private invalidationDrain?: Promise<void>
+  private invalidationFailure?: unknown
+  private stateReleased = false
 
   constructor(
     redis: RedisAdaptiveCacheBackend,
@@ -47,12 +60,19 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     this.redisPrefix = redisPrefix
     this.redis = redis
     this.client = redis.client
-    let state = clientStates.get(this.client)
-    if (!state) {
-      state = { pendingUpdates: new Set(), hydrations: new Set(), generation: 0 }
-      clientStates.set(this.client, state)
+    let states = clientStates.get(this.client)
+    if (!states) {
+      states = new Map()
+      clientStates.set(this.client, states)
     }
+    let state = states.get(redisPrefix)
+    if (!state) {
+      state = { pendingUpdates: new Set(), hydrations: new Set(), generation: 0, references: 0 }
+      states.set(redisPrefix, state)
+    }
+    state.references++
     this.state = state
+    this.stateMap = states
     this.lru = lru
     this.logger = logger
     this.writeMode = writeMode
@@ -93,6 +113,7 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   public async update(input: AdaptiveCacheBackendUpdateInput): Promise<AdaptiveCacheUpdateResult> {
+    input = { ...input, tags: normalizeCacheTags(input.tags, 'L1 Redis cache write').tags }
     const token = input.writeToken || (await this.redis.captureWriteToken(input.redisPrefix))
     // Explicitly fenced writes cannot be visible before Redis accepts them.
     const optimistic = this.writeMode === 'async' && (!input.writeToken || input.allowOptimistic) && !input.lockKey
@@ -164,6 +185,7 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   public async invalidateTags(tags: string[], redisPrefix: string) {
+    tags = normalizeCacheTags(tags, 'L1 Redis tag invalidation').tags
     this.state.generation++
     await this.flush()
     const redisKeys = await this.redis.invalidateTags(tags, redisPrefix)
@@ -228,18 +250,31 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
         failures.push(error)
       }
     }
+    this.releaseClientState()
     if (failures.length > 0) throw failures[0]
   }
 
   public async flush() {
     await Promise.allSettled(Array.from(this.state.pendingUpdates))
+    let retried = false
+    for (;;) {
+      while (this.invalidationDrain) await this.invalidationDrain
+      if (!this.invalidationFailure) return
+      if (!retried && this.pendingInvalidationKeys.size > 0) {
+        retried = true
+        this.invalidationFailure = undefined
+        this.scheduleInvalidationDrain()
+        continue
+      }
+      throw this.invalidationFailure
+    }
   }
 
   private subscribeInvalidations() {
     try {
       this.subscriber = this.client.duplicate()
-      this.subscriber.on('message', (_channel, payload) => {
-        this.handleInvalidation(payload)
+      this.subscriber.on('message', (channel, payload) => {
+        if (channel === this.channel) this.handleInvalidation(payload)
       })
       this.subscriber.on('error', (err) => {
         this.logger.warn('Redis L1 invalidation subscriber error:', err)
@@ -253,6 +288,7 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   private handleInvalidation(payload: string) {
+    if (Buffer.byteLength(payload, 'utf8') > MAX_INVALIDATION_PAYLOAD_BYTES) return
     let message: InvalidationMessage
     try {
       message = JSON.parse(payload)
@@ -264,33 +300,92 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     if (
       !message ||
       typeof message !== 'object' ||
+      typeof message.source !== 'string' ||
       message.source === this.sourceId ||
       !Array.isArray(message.keys) ||
-      !message.keys.every((key) => typeof key === 'string')
+      message.keys.length === 0 ||
+      message.keys.length > MAX_INVALIDATION_KEYS ||
+      !message.keys.every(
+        (key) => typeof key === 'string' && key.length > 0 && Buffer.byteLength(key, 'utf8') <= MAX_INVALIDATION_KEY_BYTES,
+      )
     ) {
       return
     }
 
+    let added = false
+    for (const key of new Set(message.keys)) {
+      if (this.pendingInvalidationKeys.has(key)) continue
+      if (this.pendingInvalidationKeys.size >= MAX_PENDING_INVALIDATION_KEYS) break
+      this.pendingInvalidationKeys.add(key)
+      added = true
+    }
+    if (!added) return
     this.state.generation++
-    Promise.allSettled([...this.state.hydrations])
-      .then(() => this.lru.deleteKeys(message.keys))
+    this.scheduleInvalidationDrain()
+  }
+
+  private scheduleInvalidationDrain() {
+    if (this.invalidationDrain || this.pendingInvalidationKeys.size === 0) return
+    let failed = false
+    const drain = async () => {
+      while (this.pendingInvalidationKeys.size > 0) {
+        const keys = Array.from(this.pendingInvalidationKeys).slice(0, INVALIDATION_BATCH_SIZE)
+        await Promise.allSettled([...this.state.hydrations])
+        await this.lru.deleteKeys(keys)
+        keys.forEach((key) => this.pendingInvalidationKeys.delete(key))
+      }
+    }
+    const tracked = drain()
+      .then(() => {
+        this.invalidationFailure = undefined
+      })
       .catch((err) => {
+        failed = true
+        this.invalidationFailure = err
         this.logger.warn('Failed to apply Redis L1 invalidation:', err)
       })
+      .finally(() => {
+        this.invalidationDrain = undefined
+        if (!failed) this.scheduleInvalidationDrain()
+      })
+    this.invalidationDrain = tracked
   }
 
   private async publishInvalidation(keys: string[]) {
     if (keys.length === 0) return
-
-    const message: InvalidationMessage = {
-      source: this.sourceId,
-      keys,
-    }
-
     try {
-      await this.client.publish(this.channel, JSON.stringify(message))
+      const baseBytes = Buffer.byteLength(JSON.stringify({ source: this.sourceId, keys: [] }), 'utf8')
+      let batch: string[] = []
+      let batchBytes = baseBytes
+      const publishBatch = async () => {
+        if (batch.length === 0) return
+        await this.client.publish(this.channel, JSON.stringify({ source: this.sourceId, keys: batch }))
+        batch = []
+        batchBytes = baseBytes
+      }
+      for (const key of new Set(keys)) {
+        if (typeof key !== 'string' || key.length === 0 || Buffer.byteLength(key, 'utf8') > MAX_INVALIDATION_KEY_BYTES)
+          continue
+        const encodedBytes = Buffer.byteLength(JSON.stringify(key), 'utf8')
+        const separatorBytes = batch.length === 0 ? 0 : 1
+        if (
+          batch.length >= MAX_INVALIDATION_KEYS ||
+          batchBytes + separatorBytes + encodedBytes > MAX_INVALIDATION_PAYLOAD_BYTES
+        )
+          await publishBatch()
+        batch.push(key)
+        batchBytes += (batch.length === 1 ? 0 : 1) + encodedBytes
+      }
+      await publishBatch()
     } catch (err) {
       this.logger.warn('Failed to publish Redis L1 invalidation:', err)
     }
+  }
+
+  private releaseClientState() {
+    if (this.stateReleased) return
+    this.stateReleased = true
+    this.state.references--
+    if (this.state.references === 0) this.stateMap.delete(this.redisPrefix)
   }
 }

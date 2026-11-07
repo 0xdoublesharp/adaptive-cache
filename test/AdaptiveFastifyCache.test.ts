@@ -265,11 +265,11 @@ describe('Adaptive Fastify Cache', () => {
     expect(res.headers['x-cache']).toBeUndefined()
   })
 
-  it('should set default lock expiration', async () => {
+  it('should keep adapter lock expiration instance-local', async () => {
     const spy = vi.spyOn(cacheModule.AdaptiveCache, 'setDefaultLockExpirationSeconds')
     const fastify = Fastify()
     await fastify.register(makeAdapter({ lockExpirationSeconds: 99 }))
-    expect(spy).toHaveBeenCalledWith(99)
+    expect(spy).not.toHaveBeenCalled()
   })
 
   it('should handle maxTTL as a function returning a value', async () => {

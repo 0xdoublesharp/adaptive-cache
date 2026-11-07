@@ -25,6 +25,21 @@ afterEach(async () => {
 })
 
 describe('release core fixes', () => {
+  it('validates public lock expirations and keeps lease capabilities out of logs', async () => {
+    const { cache } = create()
+    const info = vi.spyOn(cache.logger, 'info')
+    expect(() => AdaptiveCache.setDefaultLockExpirationSeconds(0)).toThrow(RangeError)
+    expect(() => AdaptiveCache.setDefaultLockExpirationSeconds(Number.NaN)).toThrow(RangeError)
+    await expect(cache.shouldRefresh('invalid-lock', 0, false, 0)).rejects.toThrow(RangeError)
+    await cache.shouldRefresh('valid-lock', 0, false, 1)
+    expect(info).not.toHaveBeenCalled()
+  })
+
+  it('does not record refresh success after the public lease is already absent', async () => {
+    const { backend } = create()
+    expect(await backend.releaseLock('missing-lock', 100, 'owner')).toEqual(['LOCK_MISMATCH', ''])
+  })
+
   it.each(['getMany', 'setMany', 'clearMany'] as const)('rejects empty %s after shutdown', async (method) => {
     const { cache } = create()
     await cache.close()

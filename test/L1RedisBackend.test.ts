@@ -10,6 +10,32 @@ const namespace = (name: string) => `adaptive-cache-backend-${name}-${Date.now()
 const logger = () => new Logger('silent')
 
 describe('L1RedisAdaptiveCacheBackend', () => {
+  it('rejects invalid tags before an optimistic L1 write', async () => {
+    const redis = new FakeRedis()
+    const redisBackend = new RedisAdaptiveCacheBackend(redis as any, logger())
+    const lru = new ClusteredLruAdaptiveCacheBackend({ namespace: namespace('invalid-tag') }, logger())
+    const store = vi.spyOn(lru, 'storeConservative')
+    const backend = new L1RedisAdaptiveCacheBackend(redisBackend, lru, 'adaptive:', logger())
+
+    await expect(
+      backend.update({
+        key: 'invalid-tag',
+        dataKey: 'invalid-tagdata',
+        metaKey: 'invalid-tagmeta',
+        redisPrefix: 'adaptive:',
+        encodedData: 'value',
+        responseHash: 'hash',
+        initialTTL: 5,
+        maxTTL: 60,
+        ttlScaling: 2,
+        metaTTL: 100,
+        tags: [''],
+      }),
+    ).rejects.toThrow('non-empty')
+    expect(store).not.toHaveBeenCalled()
+    await backend.quit()
+  })
+
   it.each(['flush', 'subscriber', 'redis', 'all'])('finishes all cleanup after %s shutdown failure', async (stage) => {
     const redis = new FakeRedis()
     const redisBackend = new RedisAdaptiveCacheBackend(redis as any, logger(), true)
@@ -399,15 +425,189 @@ describe('L1RedisAdaptiveCacheBackend', () => {
 
     subscriber.emit('error', new Error('subscriber error'))
     subscriber.emit('message', 'adaptive:l1:invalidate', JSON.stringify({ source: 'external', keys: [] }))
-    ;(backend as any).lru.deleteKeys = vi.fn(async () => {
-      throw new Error('delete failed')
-    })
+    const remove = vi.spyOn((backend as any).lru, 'deleteKeys').mockRejectedValue(new Error('delete failed'))
     ;(backend as any).handleInvalidation(JSON.stringify({ source: 'external', keys: ['key'] }))
 
     await vi.waitFor(() => {
       expect((backend as any).lru.deleteKeys).toHaveBeenCalledWith(['key'])
     })
 
+    remove.mockResolvedValue(undefined)
+    await backend.flush()
     await backend.quit()
+  })
+
+  it('bounds, deduplicates, and drains subscriber invalidation work', async () => {
+    const redis = new FakeRedis()
+    const redisBackend = new RedisAdaptiveCacheBackend(redis as any, logger())
+    const lru = new ClusteredLruAdaptiveCacheBackend(
+      { namespace: namespace('bounded-invalidation'), maxSizeBytes: 1024 * 1024 },
+      logger(),
+    )
+    const backend = new L1RedisAdaptiveCacheBackend(redisBackend, lru, 'adaptive:', logger())
+    let release!: () => void
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const remove = vi.spyOn(lru, 'deleteKeys').mockImplementation(async () => {
+      await barrier
+    })
+    const generation = (backend as any).state.generation
+
+    ;(backend as any).handleInvalidation(JSON.stringify({ source: 'external', keys: [] }))
+    ;(backend as any).handleInvalidation(JSON.stringify({ source: 'external', keys: ['x'.repeat(5000)] }))
+    expect((backend as any).state.generation).toBe(generation)
+    expect(remove).not.toHaveBeenCalled()
+
+    ;(backend as any).handleInvalidation(JSON.stringify({ source: 'external', keys: ['a', 'a', 'b'] }))
+    await vi.waitFor(() => expect(remove).toHaveBeenCalledWith(['a', 'b']))
+    const firstGeneration = (backend as any).state.generation
+    ;(backend as any).handleInvalidation(JSON.stringify({ source: 'external', keys: ['a', 'b'] }))
+    expect((backend as any).state.generation).toBe(firstGeneration)
+    ;(backend as any).handleInvalidation(JSON.stringify({ source: 'external', keys: ['c'] }))
+    expect((backend as any).state.generation).toBe(firstGeneration + 1)
+    let flushed = false
+    const flushing = backend.flush().then(() => {
+      flushed = true
+    })
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(flushed).toBe(false)
+    release()
+    await flushing
+    expect(remove).toHaveBeenCalledWith(['c'])
+    await backend.quit()
+  })
+
+  it('rejects malformed and oversized subscriber messages before scheduling work', async () => {
+    const redis = new FakeRedis()
+    const redisBackend = new RedisAdaptiveCacheBackend(redis as any, logger())
+    const lru = new ClusteredLruAdaptiveCacheBackend({ namespace: namespace('invalid-messages') }, logger())
+    const backend = new L1RedisAdaptiveCacheBackend(redisBackend, lru, 'adaptive:', logger())
+    const remove = vi.spyOn(lru, 'deleteKeys')
+    const generation = (backend as any).state.generation
+    const invalid = [
+      'x'.repeat(256 * 1024 + 1),
+      JSON.stringify(null),
+      JSON.stringify('message'),
+      JSON.stringify({ source: 1, keys: ['key'] }),
+      JSON.stringify({ source: 'external', keys: 'key' }),
+      JSON.stringify({ source: 'external', keys: Array.from({ length: 1025 }, () => 'key') }),
+      JSON.stringify({ source: 'external', keys: [1] }),
+      JSON.stringify({ source: 'external', keys: [''] }),
+    ]
+
+    for (const payload of invalid) (backend as any).handleInvalidation(payload)
+    const subscriber = (backend as any).subscriber as FakeRedis
+    subscriber.emit('message', 'another-channel', JSON.stringify({ source: 'external', keys: ['key'] }))
+
+    expect((backend as any).state.generation).toBe(generation)
+    expect(remove).not.toHaveBeenCalled()
+    await backend.quit()
+  })
+
+  it('caps pending invalidations and deletes accepted work in bounded batches', async () => {
+    const redis = new FakeRedis()
+    const redisBackend = new RedisAdaptiveCacheBackend(redis as any, logger())
+    const lru = new ClusteredLruAdaptiveCacheBackend({ namespace: namespace('pending-cap') }, logger())
+    const backend = new L1RedisAdaptiveCacheBackend(redisBackend, lru, 'adaptive:', logger())
+    const pending = (backend as any).pendingInvalidationKeys as Set<string>
+    for (let index = 0; index < 4096; index++) pending.add(`pending-${index}`)
+    const generation = (backend as any).state.generation
+    ;(backend as any).handleInvalidation(JSON.stringify({ source: 'external', keys: ['overflow'] }))
+    expect((backend as any).state.generation).toBe(generation)
+    pending.clear()
+
+    const remove = vi.spyOn(lru, 'deleteKeys')
+    const keys = Array.from({ length: 130 }, (_, index) => `batch-${index}`)
+    ;(backend as any).handleInvalidation(JSON.stringify({ source: 'external', keys }))
+    await backend.flush()
+
+    expect(remove).toHaveBeenNthCalledWith(1, keys.slice(0, 128))
+    expect(remove).toHaveBeenNthCalledWith(2, keys.slice(128))
+    await backend.quit()
+  })
+
+  it('chunks published invalidations to the subscriber limits', async () => {
+    const redis = new FakeRedis()
+    const redisBackend = new RedisAdaptiveCacheBackend(redis as any, logger())
+    const lru = new ClusteredLruAdaptiveCacheBackend({ namespace: namespace('chunked-invalidation') }, logger())
+    const backend = new L1RedisAdaptiveCacheBackend(redisBackend, lru, 'adaptive:', logger())
+    const keys = Array.from({ length: 2050 }, (_, index) => `key-${index}`)
+
+    await (backend as any).publishInvalidation(keys)
+
+    expect(redis.published).toHaveLength(3)
+    expect(redis.published.flatMap(({ payload }) => JSON.parse(payload).keys)).toEqual(keys)
+    expect(redis.published.every(({ payload }) => Buffer.byteLength(payload, 'utf8') <= 256 * 1024)).toBe(true)
+    expect(redis.published.every(({ payload }) => JSON.parse(payload).keys.length <= 1024)).toBe(true)
+
+    redis.published = []
+    await (backend as any).publishInvalidation(['', 1, 'x'.repeat(5000)])
+    expect(redis.published).toEqual([])
+    const largeKeys = Array.from({ length: 100 }, (_, index) => `${index}:` + 'x'.repeat(3000))
+    await (backend as any).publishInvalidation(largeKeys)
+    expect(redis.published.length).toBeGreaterThan(1)
+    expect(redis.published.flatMap(({ payload }) => JSON.parse(payload).keys)).toEqual(largeKeys)
+    expect(redis.published.every(({ payload }) => Buffer.byteLength(payload, 'utf8') <= 256 * 1024)).toBe(true)
+    await backend.quit()
+  })
+
+  it('retries a failed subscriber invalidation batch before flush completes', async () => {
+    const redis = new FakeRedis()
+    const redisBackend = new RedisAdaptiveCacheBackend(redis as any, logger())
+    const lru = new ClusteredLruAdaptiveCacheBackend({ namespace: namespace('retry-invalidation') }, logger())
+    const backend = new L1RedisAdaptiveCacheBackend(redisBackend, lru, 'adaptive:', logger())
+    const remove = vi.spyOn(lru, 'deleteKeys').mockRejectedValueOnce(new Error('temporary L1 failure'))
+
+    ;(backend as any).handleInvalidation(JSON.stringify({ source: 'external', keys: ['retry'] }))
+    await backend.flush()
+
+    expect(remove).toHaveBeenCalledTimes(2)
+    await backend.quit()
+  })
+
+  it('reports a persistent subscriber invalidation failure after one retry', async () => {
+    const redis = new FakeRedis()
+    const redisBackend = new RedisAdaptiveCacheBackend(redis as any, logger())
+    const lru = new ClusteredLruAdaptiveCacheBackend({ namespace: namespace('failed-invalidation') }, logger())
+    const backend = new L1RedisAdaptiveCacheBackend(redisBackend, lru, 'adaptive:', logger())
+    const remove = vi.spyOn(lru, 'deleteKeys').mockRejectedValue(new Error('persistent L1 failure'))
+
+    ;(backend as any).handleInvalidation(JSON.stringify({ source: 'external', keys: ['retry'] }))
+    await expect(backend.flush()).rejects.toThrow('persistent L1 failure')
+    expect(remove).toHaveBeenCalledTimes(2)
+    remove.mockResolvedValue(undefined)
+    await backend.flush()
+    await backend.quit()
+  })
+
+  it('releases shared per-prefix state after the last backend closes', async () => {
+    const redis = new FakeRedis()
+    const redisBackend = new RedisAdaptiveCacheBackend(redis as any, logger())
+    const first = new L1RedisAdaptiveCacheBackend(
+      redisBackend,
+      new ClusteredLruAdaptiveCacheBackend({ namespace: namespace('state-first') }, logger()),
+      'state:',
+      logger(),
+    )
+    const second = new L1RedisAdaptiveCacheBackend(
+      redisBackend,
+      new ClusteredLruAdaptiveCacheBackend({ namespace: namespace('state-second') }, logger()),
+      'state:',
+      logger(),
+    )
+    const originalState = (first as any).state
+    expect((second as any).state).toBe(originalState)
+    await first.quit()
+    await second.quit()
+
+    const third = new L1RedisAdaptiveCacheBackend(
+      redisBackend,
+      new ClusteredLruAdaptiveCacheBackend({ namespace: namespace('state-third') }, logger()),
+      'state:',
+      logger(),
+    )
+    expect((third as any).state).not.toBe(originalState)
+    await third.quit()
   })
 })

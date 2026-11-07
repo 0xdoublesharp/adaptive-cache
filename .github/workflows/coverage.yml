@@ -9,10 +9,7 @@ on:
   pull_request:
 
 permissions:
-  actions: read
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -22,8 +19,9 @@ jobs:
   doublcov:
     name: Doublcov
     runs-on: ubuntu-latest
-    env:
-      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+    permissions:
+      actions: read
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -56,7 +54,9 @@ jobs:
         run: pnpm run test:coverage
 
       - name: Upload Codecov report
-        if: env.CODECOV_TOKEN != ''
+        if: github.event_name != 'pull_request' && env.CODECOV_TOKEN != ''
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         uses: codecov/codecov-action@v6
         with:
           token: ${{ env.CODECOV_TOKEN }}
@@ -163,6 +163,10 @@ jobs:
     needs: doublcov
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}coverage/

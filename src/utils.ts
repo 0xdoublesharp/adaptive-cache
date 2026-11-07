@@ -24,6 +24,7 @@ export const cache = (time: string | number = cacheTime): AdaptiveCacheOptions =
 }
 
 const DEFAULT_IGNORED_QUERY_PARAMS = ['refresh']
+const MAX_PLAIN_REQUEST_PATH_BYTES = 1024
 
 const normalizeQueryValue = (value: any): any => {
   if (Array.isArray(value)) return value.map(normalizeQueryValue)
@@ -41,8 +42,15 @@ export const normalizeCacheQuery = (querystring: any, ignoreQueryParams: string[
   if (!querystring || typeof querystring !== 'object') return querystring
 
   const ignored = new Set(ignoreQueryParams)
+  const usesDefaultControlPolicy = ignoreQueryParams === DEFAULT_IGNORED_QUERY_PARAMS
   return Object.keys(querystring)
-    .filter((key) => !ignored.has(key))
+    .filter((key) => {
+      if (!ignored.has(key)) return true
+      // Only the scalar value recognized by both HTTP adapters is a default
+      // control input. Other values remain application input and must be keyed.
+      if (usesDefaultControlPolicy) return querystring[key] !== 'true'
+      return false
+    })
     .sort()
     .reduce<Record<string, any>>((normalized, key) => {
       normalized[key] = normalizeQueryValue(querystring[key])
@@ -57,7 +65,11 @@ export const getAdaptiveCacheKey = (
   ignoreQueryParams?: string[],
   authority?: string,
 ) => {
-  const baseKey = requestPath + ':' // Remove query params from cache key
+  const pathKey =
+    Buffer.byteLength(requestPath, 'utf8') <= MAX_PLAIN_REQUEST_PATH_BYTES
+      ? requestPath
+      : `path-sha256:${crypto.createHash('sha256').update(requestPath).digest('hex')}`
+  const baseKey = pathKey + ':'
   const queryKey =
     crypto
       .createHash('sha256')

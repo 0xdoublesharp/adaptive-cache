@@ -20,7 +20,12 @@ import {
 import { AdaptiveCache } from './AdaptiveCache'
 import { getDefaultCache } from './singleton'
 import { getAdaptiveCacheKey } from './utils'
-import { AdaptiveCacheBackend, AdaptiveCacheLoadOptions, AdaptiveCacheOptions } from './types'
+import {
+  AdaptiveCacheBackend,
+  AdaptiveCacheLoaderContext,
+  AdaptiveCacheLoadOptions,
+  AdaptiveCacheOptions,
+} from './types'
 
 export type ExpressRequestLike = {
   method?: string
@@ -44,7 +49,7 @@ export type AdaptiveExpressCacheOptions<Req extends ExpressRequestLike = Express
   HttpPolicyOptions<Req> & {
     cache?: AdaptiveCache
     tags?: string[] | ((req: Req) => string[])
-    loader?: (req: Req) => Promise<unknown>
+    loader?: (req: Req, context: AdaptiveCacheLoaderContext) => Promise<unknown>
   }
 
 export type AdaptiveExpressCacheMiddleware<Req extends ExpressRequestLike = ExpressRequestLike> = ((
@@ -128,10 +133,6 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
   let closed = false
   let closePromise: Promise<void> | undefined
 
-  if (typeof options.lockExpirationSeconds === 'number') {
-    AdaptiveCache.setDefaultLockExpirationSeconds(options.lockExpirationSeconds)
-  }
-
   const trackWrite = (promise: Promise<unknown>) => {
     pendingWrites.add(promise)
     const forget = () => pendingWrites.delete(promise)
@@ -171,7 +172,7 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
 
   const middleware = async (req: any, res: ExpressResponseLike, next: ExpressNextFunctionLike) => {
     const { loadOnce, wait, remaining } = createHttpLoader(
-      () => loader!(req),
+      (context) => loader!(req, context),
       cacheInstance.resolveLoadTimeoutMs(options),
     )
     const serveBypass = async (diagnostic: 'BYPASS' | 'RETRY' = 'BYPASS') => {
@@ -250,8 +251,8 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
         }
         const value = await cacheInstance.getOrSet(
           adaptiveCacheKey,
-          async () => {
-            const body = await loadOnce()
+          async (context) => {
+            const body = await loadOnce(context)
             loadedThisRequest = true
             loaderStoreAllowed = responseCacheable(req, loaderResponse)
             if (!loaderStoreAllowed) return UNSHAREABLE_HTTP_RESULT

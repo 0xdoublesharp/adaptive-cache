@@ -32,6 +32,17 @@ const makeCache = (overrides = {}) => {
 }
 
 describe('cache correctness regressions', () => {
+  it('keeps non-control refresh values in HTTP cache identity', () => {
+    const ordinary = getAdaptiveCacheKey('/items', {}, 'test:')
+    expect(getAdaptiveCacheKey('/items', { refresh: 'true' }, 'test:')).toBe(ordinary)
+    expect(getAdaptiveCacheKey('/items', { refresh: 'false' }, 'test:')).not.toBe(ordinary)
+    expect(getAdaptiveCacheKey('/items', { refresh: ['true'] }, 'test:')).not.toBe(ordinary)
+  })
+
+  it('bounds default HTTP cache keys for long request paths', () => {
+    expect(Buffer.byteLength(getAdaptiveCacheKey('/' + 'x'.repeat(10_000), {}, 'test:'), 'utf8')).toBeLessThan(512)
+  })
+
   it('distinguishes own __proto__ query keys at every depth', () => {
     for (const query of [JSON.parse('{"__proto__":{"x":1}}'), JSON.parse('{"nested":{"__proto__":{"x":1}}}')]) {
       const without = 'nested' in query ? { nested: {} } : {}
@@ -118,6 +129,22 @@ describe('cache correctness regressions', () => {
     expect((await cache.get('size'))?.data).toBe('small')
     await cache.set('size', 'x'.repeat(2048))
     expect(await cache.get('size')).toBeNull()
+    const primary = await (cache as any).backend.getCache()
+    expect(await primary.get('sizemeta', { bypassL1: true })).toBeUndefined()
+    expect(await primary.get('sizedata:epoch', { bypassL1: true })).toBeUndefined()
+  })
+
+  it('counts long clustered-LRU keys against the entry-size limit', async () => {
+    const config = options()
+    const cache = makeCache({ lru: { ...config.lru, maxEntrySizeBytes: 1024 } })
+    const key = 'k'.repeat(220)
+
+    expect((await cache.set(key, 'small'))[0]).toBe('INVALIDATED')
+    expect(await cache.get(key)).toBeNull()
+    const primary = await (cache as any).backend.getCache()
+    expect(await primary.get(key + 'data', { bypassL1: true })).toBeUndefined()
+    expect(await primary.get(key + 'meta', { bypassL1: true })).toBeUndefined()
+    expect(await primary.get(key + 'data:epoch', { bypassL1: true })).toBeUndefined()
   })
 })
 

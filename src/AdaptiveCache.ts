@@ -1,10 +1,12 @@
 import Redis from 'ioredis'
+import { constants as bufferConstants } from 'node:buffer'
 import crypto from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { encode, decode, encodePayload, fingerprint } from './payload'
 import { Logger } from './lib/logger'
 import { CacheLoader } from './CacheLoader'
 import { normalizeTtlPolicy, validateTtlPolicySeed } from './ttlPolicy'
+import { normalizeCacheTags } from './tagValidation'
 import { ClusteredLruAdaptiveCacheBackend } from './backends/ClusteredLruAdaptiveCacheBackend'
 import { L1RedisAdaptiveCacheBackend } from './backends/L1RedisAdaptiveCacheBackend'
 import { RedisAdaptiveCacheBackend } from './backends/RedisAdaptiveCacheBackend'
@@ -60,6 +62,7 @@ export class AdaptiveCache {
   public static DEFAULT_CLOSE_TIMEOUT_MS = 5000
 
   public static setDefaultLockExpirationSeconds(secs: number) {
+    validateNumber('lockExpirationSeconds', secs, 0, false)
     AdaptiveCache.DEFAULT_LOCK_EXPIRATION_SECONDS = secs
   }
 
@@ -98,6 +101,20 @@ export class AdaptiveCache {
     if (options.metaTTL !== undefined && !Number.isInteger(options.metaTTL))
       throw new RangeError('metaTTL must be a positive integer number of seconds')
     validateNumber('compression.minBytes', options.compression?.minBytes)
+    validateNumber('compression.maxDecodedBytes', options.compression?.maxDecodedBytes, 0, false)
+    if (
+      options.compression?.maxDecodedBytes !== undefined &&
+      !Number.isSafeInteger(options.compression.maxDecodedBytes)
+    )
+      throw new RangeError('compression.maxDecodedBytes must be a positive safe integer')
+    if (
+      options.compression?.maxDecodedBytes !== undefined &&
+      options.compression.maxDecodedBytes > bufferConstants.MAX_LENGTH
+    )
+      throw new RangeError(`compression.maxDecodedBytes must be at most ${bufferConstants.MAX_LENGTH}`)
+    validateNumber('redis.maxTagCleanupKeys', options.redis?.maxTagCleanupKeys, 0, false)
+    if (options.redis?.maxTagCleanupKeys !== undefined && !Number.isSafeInteger(options.redis.maxTagCleanupKeys))
+      throw new RangeError('redis.maxTagCleanupKeys must be a positive safe integer')
     validateTtlPolicySeed(this.ttlPolicy, options.initialTTL ?? 5)
     this.options = options
     this.logger = new Logger(options.logLevel || 'info')
@@ -141,7 +158,12 @@ export class AdaptiveCache {
     const ownsClient = !client
     this.redisClient = client || RedisAdaptiveCacheBackend.createClient(this.logger)
     try {
-      const redisBackend = new RedisAdaptiveCacheBackend(this.redisClient, this.logger, ownsClient)
+      const redisBackend = new RedisAdaptiveCacheBackend(
+        this.redisClient,
+        this.logger,
+        ownsClient,
+        options.redis?.maxTagCleanupKeys,
+      )
 
       if (backendName === 'l1-redis') {
         return new L1RedisAdaptiveCacheBackend(
@@ -295,6 +317,7 @@ export class AdaptiveCache {
     signal?: AbortSignal,
   ) {
     validateSettings(options)
+    const tags = normalizeCacheTags(options.tags ?? [], 'Cache write').tags
     const started = performance.now()
     try {
       const { initialTTL = 5, ttlScaling = 2, metaTTL = 60 * 60 * 24 * 7 } = this.options
@@ -324,7 +347,7 @@ export class AdaptiveCache {
         ttlScaling,
         ...(this.ttlPolicy.type === 'adaptive' ? {} : { ttlPolicy: this.ttlPolicy }),
         metaTTL,
-        tags: options.tags || [],
+        tags,
         writeToken,
         staleTTL: options.staleTTL ?? Math.max(this.options.staleWhileRevalidate ?? 0, this.options.staleIfError ?? 0),
         ttlJitter: options.ttlJitter ?? this.options.ttlJitter,
@@ -411,9 +434,10 @@ export class AdaptiveCache {
 
   public async invalidateTags(tags: string[]) {
     this.assertOpen()
+    const normalized = normalizeCacheTags(tags, 'Cache invalidation').tags
     return this.track(
       (async () => {
-        await this.backend.invalidateTags(tags, this.getKeyPrefix())
+        await this.backend.invalidateTags(normalized, this.getKeyPrefix())
         this.emit({ type: 'invalidate', reason: 'tags' })
       })(),
     )
@@ -446,13 +470,13 @@ export class AdaptiveCache {
     force: boolean,
     lockExpirationSeconds?: number,
   ) {
+    validateNumber('lockExpirationSeconds', lockExpirationSeconds, 0, false)
     const currentTime = Math.floor(Date.now() / 1000)
     const effectiveLockSeconds =
       typeof lockExpirationSeconds === 'number'
         ? lockExpirationSeconds
-        : this.options.lockExpirationSeconds || AdaptiveCache.DEFAULT_LOCK_EXPIRATION_SECONDS
+        : (this.options.lockExpirationSeconds ?? AdaptiveCache.DEFAULT_LOCK_EXPIRATION_SECONDS)
     const lockValue = crypto.randomUUID()
-    this.logger.info('shouldRefreshCache lockValue', lockValue)
 
     const result = await this.backend.shouldRefresh(
       lastUpdateKey,

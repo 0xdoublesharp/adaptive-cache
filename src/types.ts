@@ -174,6 +174,8 @@ export interface AdaptiveCacheCompressionOptions {
   async?: boolean
   skipCompressed?: boolean
   onlyIfSmaller?: boolean
+  /** Maximum serialized payload bytes accepted for writes and decoded reads. Defaults to 64 MiB. */
+  maxDecodedBytes?: number
 }
 
 export interface AdaptiveCacheBackendFetchInput {
@@ -266,6 +268,11 @@ export interface AdaptiveCacheL1RedisOptions {
   writeMode?: 'async' | 'await-redis'
 }
 
+export interface AdaptiveCacheRedisOptions {
+  /** Maximum key memberships processed by one tag invalidation. Defaults to 10,000. */
+  maxTagCleanupKeys?: number
+}
+
 export interface AdaptiveCacheOptions {
   ttlPolicy?: AdaptiveCacheTtlPolicy
   initialTTL?: number // Initial TTL for data in seconds
@@ -296,5 +303,6 @@ export interface AdaptiveCacheOptions {
   backend?: AdaptiveCacheBackendName | AdaptiveCacheBackend
   lru?: AdaptiveCacheLruOptions
   l1Redis?: AdaptiveCacheL1RedisOptions
+  redis?: AdaptiveCacheRedisOptions
   ignoreQueryParams?: string[] // Query params ignored when computing middleware cache keys
 }

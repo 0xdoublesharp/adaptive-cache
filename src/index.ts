@@ -4,6 +4,7 @@ import {
   AdaptiveCacheL1RedisOptions,
   AdaptiveCacheLruOptions,
   AdaptiveCacheOptions,
+  AdaptiveCacheRedisOptions,
 } from './types'
 import { AdaptiveCache } from './AdaptiveCache'
 import { getDefaultCache, redis } from './singleton'
@@ -17,6 +18,7 @@ export {
   AdaptiveCacheBackendName,
   AdaptiveCacheL1RedisOptions,
   AdaptiveCacheLruOptions,
+  AdaptiveCacheRedisOptions,
   AdaptiveCache,
 }
 export type {
@@ -38,6 +40,7 @@ export type {
   AdaptiveCacheUpdateResult,
 } from './types'
 export { getDefaultCache, redis }
+export { bootstrapClusteredLru } from './backends/ClusteredLruAdaptiveCacheBackend'
 export { adaptiveExpressCache, clearAdaptiveCache, adaptiveFastifyCache, cache }
 export type { AdaptiveExpressCacheOptions, AdaptiveExpressCacheMiddleware } from './AdaptiveExpressCache'
 export type { AdaptiveFastifyCacheOptions, AdaptiveFastifyCachePlugin } from './AdaptiveFastifyCache'

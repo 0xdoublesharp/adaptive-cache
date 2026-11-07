@@ -4,8 +4,39 @@ import { promisify } from 'node:util'
 import type { AdaptiveCacheOptions } from './types'
 
 const gzip = promisify(zlib.gzip)
-const gunzip = promisify(zlib.gunzip)
 const CODEC_PREFIX = 'adaptive-cache:v2:'
+const DEFAULT_MAX_DECODED_BYTES = 64 * 1024 * 1024
+
+const enforcePayloadSize = (raw: string, maxDecodedBytes: number) => {
+  if (Buffer.byteLength(raw, 'utf8') > maxDecodedBytes)
+    throw new RangeError(`Cache payload exceeds compression.maxDecodedBytes (${maxDecodedBytes})`)
+  return raw
+}
+
+const sliceBoundedRaw = (encoded: string, start: number, maxDecodedBytes: number) => {
+  if (encoded.length - start > maxDecodedBytes)
+    throw new RangeError(`Cache payload exceeds compression.maxDecodedBytes (${maxDecodedBytes})`)
+  return encoded.slice(start)
+}
+
+const decodeBoundedBase64 = (encoded: string, start: number, maxDecodedBytes: number) => {
+  // zlib's stored blocks add at most five bytes per 16,383 input bytes, plus
+  // gzip framing. This admits payloads written by encode() without allocating
+  // an attacker-sized Buffer before maxOutputLength can take effect.
+  const maxCompressedBytes = maxDecodedBytes + Math.ceil(maxDecodedBytes / 16_383) * 5 + 64
+  const maxEncodedCharacters = Math.ceil(maxCompressedBytes / 3) * 4
+  if (encoded.length - start > maxEncodedCharacters)
+    throw new RangeError(`Encoded cache payload exceeds compression.maxDecodedBytes (${maxDecodedBytes})`)
+  return Buffer.from(encoded.slice(start), 'base64')
+}
+
+const gunzip = (bytes: Buffer, maxOutputLength: number) =>
+  new Promise<Buffer>((resolve, reject) => {
+    zlib.gunzip(bytes, { maxOutputLength }, (error, result) => {
+      if (error) reject(error)
+      else resolve(result)
+    })
+  })
 
 export const encodePayload = (data: any): string =>
   JSON.stringify({
@@ -49,6 +80,8 @@ const isCompressed = (value: any) => {
 }
 
 export async function encode(data: any, options: AdaptiveCacheOptions, raw: string): Promise<string> {
+  const maxDecodedBytes = options.compression?.maxDecodedBytes ?? DEFAULT_MAX_DECODED_BYTES
+  enforcePayloadSize(raw, maxDecodedBytes)
   const settings = options.compression
   if (!settings) return options.compress === false ? raw : zlib.gzipSync(Buffer.from(raw)).toString('base64')
   const bytes = Buffer.from(raw)
@@ -67,15 +100,28 @@ export async function encode(data: any, options: AdaptiveCacheOptions, raw: stri
 
 export async function decode(encoded: string, options: AdaptiveCacheOptions): Promise<any> {
   let raw: string
+  const maxDecodedBytes = options.compression?.maxDecodedBytes ?? DEFAULT_MAX_DECODED_BYTES
   if (encoded.startsWith(CODEC_PREFIX + 'json:')) {
-    raw = encoded.slice((CODEC_PREFIX + 'json:').length)
+    raw = sliceBoundedRaw(encoded, (CODEC_PREFIX + 'json:').length, maxDecodedBytes)
   } else if (encoded.startsWith(CODEC_PREFIX + 'gzip:')) {
-    const bytes = Buffer.from(encoded.slice((CODEC_PREFIX + 'gzip:').length), 'base64')
-    raw = (options.compression?.async ? await gunzip(bytes) : zlib.gunzipSync(bytes)).toString('utf8')
+    const bytes = decodeBoundedBase64(encoded, (CODEC_PREFIX + 'gzip:').length, maxDecodedBytes)
+    raw = (
+      options.compression?.async
+        ? await gunzip(bytes, maxDecodedBytes)
+        : zlib.gunzipSync(bytes, { maxOutputLength: maxDecodedBytes })
+    ).toString('utf8')
   } else {
-    raw = options.compress === false ? encoded : zlib.gunzipSync(Buffer.from(encoded, 'base64')).toString('utf8')
+    if (options.compress === false) raw = sliceBoundedRaw(encoded, 0, maxDecodedBytes)
+    else {
+      const bytes = decodeBoundedBase64(encoded, 0, maxDecodedBytes)
+      raw = (
+        options.compression?.async
+          ? await gunzip(bytes, maxDecodedBytes)
+          : zlib.gunzipSync(bytes, { maxOutputLength: maxDecodedBytes })
+      ).toString('utf8')
+    }
   }
-  return decodePayload(raw)
+  return decodePayload(enforcePayloadSize(raw, maxDecodedBytes))
 }
 
 export function fingerprint(data: any, options: AdaptiveCacheOptions, raw: string): string {
