@@ -1,8 +1,10 @@
 import crypto from 'node:crypto'
+import { constants as bufferConstants } from 'node:buffer'
 import zlib from 'node:zlib'
 import { describe, expect, it } from 'vitest'
 import { ClusteredLruAdaptiveCacheBackend } from '../src/backends/ClusteredLruAdaptiveCacheBackend'
 import { Logger } from '../src/lib/logger'
+import { encodePayload } from '../src/payload'
 import { registerCoreCacheFixture } from './helpers/coreCache'
 
 const { create } = registerCoreCacheFixture()
@@ -103,12 +105,32 @@ describe('core payload and typed APIs', () => {
     await expect(cache.set('closed', 1)).rejects.toThrow('closed')
   })
 
-  it.each([{ initialTTL: 0 }, { ttlJitter: 2 }, { staleIfError: -1 }, { compression: { minBytes: NaN } }])(
+  it.each([
+    { initialTTL: 0 },
+    { ttlJitter: 2 },
+    { staleIfError: -1 },
+    { compression: { minBytes: NaN } },
+    { compression: { maxDecodedBytes: 0 } },
+    { compression: { maxDecodedBytes: 1.5 } },
+    { compression: { maxDecodedBytes: bufferConstants.MAX_LENGTH + 1 } },
+    { redis: { maxTagCleanupKeys: 0 } },
+    { redis: { maxTagCleanupKeys: 1.5 } },
+  ])(
     'rejects invalid options %o',
     (options) => {
       expect(() => create(options)).toThrow()
     },
   )
+
+  it('accepts valid resource ceilings', () => {
+    expect(() => create({ compression: { maxDecodedBytes: 1024 }, redis: { maxTagCleanupKeys: 1 } })).not.toThrow()
+  })
+
+  it('rejects invalid tags consistently through public writes and invalidation', async () => {
+    const cache = create()
+    await expect(cache.set('invalid-tag', 'value', { tags: [''] })).rejects.toThrow('non-empty')
+    await expect(cache.invalidateTags([''])).rejects.toThrow('non-empty')
+  })
 })
 
 describe('codec compatibility', () => {
@@ -172,6 +194,90 @@ describe('codec compatibility', () => {
 })
 
 describe('codec policy edge cases', () => {
+  it('rejects writes that would exceed the configured payload ceiling', async () => {
+    const cache = create({ compression: { maxDecodedBytes: 128 } })
+    await expect(cache.set('too-large-to-read', 'x'.repeat(2048))).rejects.toThrow('maxDecodedBytes')
+    expect(await cache.get('too-large-to-read')).toBeNull()
+  })
+
+  it.each([
+    { name: 'marked JSON', marked: true },
+    { name: 'legacy plain', marked: false },
+  ])('rejects $name payloads above maxDecodedBytes', async ({ marked }) => {
+    const backend = new ClusteredLruAdaptiveCacheBackend({ namespace: crypto.randomUUID() }, new Logger('silent'))
+    const raw = encodePayload('x'.repeat(2048))
+    await backend.update({
+      key: 'bounded-plain',
+      dataKey: 'bounded-plaindata',
+      metaKey: 'bounded-plainmeta',
+      redisPrefix: 'adaptive:',
+      encodedData: marked ? 'adaptive-cache:v2:json:' + raw : raw,
+      responseHash: 'bounded-plain',
+      initialTTL: 20,
+      maxTTL: 20,
+      ttlScaling: 2,
+      metaTTL: 30,
+      tags: [],
+    })
+    const cache = create({
+      backend,
+      ...(marked ? {} : { compress: false }),
+      compression: { maxDecodedBytes: 128 },
+    } as any)
+    await expect(cache.get('bounded-plain')).rejects.toThrow('maxDecodedBytes')
+  })
+
+  it.each([
+    { name: 'marked sync', marked: true, async: false },
+    { name: 'marked async', marked: true, async: true },
+    { name: 'legacy sync', marked: false, async: false },
+    { name: 'legacy async', marked: false, async: true },
+  ])('rejects $name gzip payloads above maxDecodedBytes', async ({ marked, async }) => {
+    const backend = new ClusteredLruAdaptiveCacheBackend({ namespace: crypto.randomUUID() }, new Logger('silent'))
+    const raw = encodePayload('x'.repeat(2048))
+    const compressed = zlib.gzipSync(raw).toString('base64')
+    const encodedData = marked ? 'adaptive-cache:v2:gzip:' + compressed : compressed
+    await backend.update({
+      key: 'bounded',
+      dataKey: 'boundeddata',
+      metaKey: 'boundedmeta',
+      redisPrefix: 'adaptive:',
+      encodedData,
+      responseHash: 'bounded',
+      initialTTL: 20,
+      maxTTL: 20,
+      ttlScaling: 2,
+      metaTTL: 30,
+      tags: [],
+    })
+    const cache = create({ backend, compression: { async, maxDecodedBytes: 128 } } as any)
+    await expect(cache.get('bounded')).rejects.toThrow()
+  })
+
+  it.each([
+    { name: 'marked', marked: true },
+    { name: 'legacy', marked: false },
+  ])('rejects oversized $name encoded gzip before base64 allocation', async ({ marked }) => {
+    const backend = new ClusteredLruAdaptiveCacheBackend({ namespace: crypto.randomUUID() }, new Logger('silent'))
+    const base64 = 'A'.repeat(Math.ceil(128 * 1.5) + 4097)
+    await backend.update({
+      key: 'bounded-encoded',
+      dataKey: 'bounded-encodeddata',
+      metaKey: 'bounded-encodedmeta',
+      redisPrefix: 'adaptive:',
+      encodedData: marked ? 'adaptive-cache:v2:gzip:' + base64 : base64,
+      responseHash: 'bounded-encoded',
+      initialTTL: 20,
+      maxTTL: 20,
+      ttlScaling: 2,
+      metaTTL: 30,
+      tags: [],
+    })
+    const cache = create({ backend, compression: { maxDecodedBytes: 128 } } as any)
+
+    await expect(cache.get('bounded-encoded')).rejects.toThrow('Encoded cache payload')
+  })
+
   it('decodes compressed text asynchronously and respects compress=false with a compression policy', async () => {
     const cache = create({ compression: { async: true } })
     const data = 'asynchronous decompression '.repeat(1000)

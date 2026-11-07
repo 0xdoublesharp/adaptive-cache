@@ -502,12 +502,12 @@ export class FakeRedis {
     recordRefresh = 1,
   ) {
     const existingLock = await this.get(lockKey)
-    if (!existingLock || existingLock === lockValue) {
+    if (existingLock === lockValue) {
       if (recordRefresh !== 0) await this.set(lastUpdateKey, String(currentTime))
       await this.del(lockKey)
       return ['UPDATED']
     }
-    return ['LOCK_MISMATCH', existingLock]
+    return ['LOCK_MISMATCH', existingLock || '']
   }
 
   private async ttl(key: string) {

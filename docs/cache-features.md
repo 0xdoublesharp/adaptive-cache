@@ -85,9 +85,11 @@ Each accepted Redis write also changes an entry revision, even when the content 
 
 New Redis tag indexes are expiry-scored sorted sets at `<prefix>__adaptive:tag-index:<tag>`. Writes prune expired memberships with bounded maintenance. Tag invalidation atomically detaches the old index and advances its epoch, making old entries unreadable immediately. Cleanup then processes bounded batches and checks generations before deleting payloads, so a concurrent fresh write survives. Active cleanup renews each unfinished detached snapshot to a 60-second TTL every 10 seconds, including snapshots queued behind a stalled batch. Abandoned snapshots expire without renewal. The drain checks original cardinality against actual member removals and resolves only when every snapshot reaches zero. A lost or evicted snapshot, failed renewal, or incomplete drain rejects explicitly rather than reporting complete invalidation. Modern entries remain epoch-fenced even if physical cleanup fails. Legacy raw payloads may remain readable until their original TTL if their snapshot is irrecoverably lost; treat rejection as incomplete invalidation. Returned keys are a deduplicated membership snapshot and may include a concurrently rewritten key whose fresh payload survived cleanup. New readers and invalidators also support legacy `<prefix>tag:<tag>` sets.
 
+Writes and invalidation share the same tag limits: at most 1024 non-empty strings, 4096 UTF-8 bytes per tag, and 256 KiB for the encoded list. Redis cleanup processes at most `redis.maxTagCleanupKeys` key memberships per invalidation, defaulting to 10000. Overlapping tags count once per membership so repeated indexes cannot bypass the work limit.
+
 New Redis entries keep freshness and generation information with the payload. Losing a separate control or tag-index key under Redis memory eviction therefore causes a miss instead of reviving invalidated data. Legacy entries remain readable, but their older format does not acquire these guarantees retroactively. Use a new key prefix when rolling out this version alongside older readers; older versions cannot decode the new Redis envelope.
 
-Redis performs token and loader ownership checks atomically with writes. Clustered LRU remains a host-local option: its dependency does not expose a distributed compare-and-write transaction. Use Redis when strict cross-worker or cross-host fencing is required. Custom backends must implement `captureWriteToken` for `getOrSet` and `invalidateNamespace` for namespace invalidation; unsupported operations fail explicitly. `supportsWriteFencing()` reports method availability, not an atomicity guarantee. `captureWriteToken()` and `set(key, value, { writeToken })` also expose fencing for caller-managed work.
+Redis performs token and loader ownership checks atomically with writes. Clustered LRU remains a host-local option: its dependency does not expose a distributed compare-and-write transaction. Its lease release uses an adaptive-cache primary handler to compare ownership, optionally record completion, and delete the lease atomically. Cluster primaries must call `bootstrapClusteredLru()` before forking; standalone use initializes automatically. Use Redis when strict cross-worker or cross-host write fencing is required. Custom backends must implement `captureWriteToken` for `getOrSet` and `invalidateNamespace` for namespace invalidation; unsupported operations fail explicitly. `supportsWriteFencing()` reports method availability, not an atomicity guarantee. `captureWriteToken()` and `set(key, value, { writeToken })` also expose fencing for caller-managed work.
 
 ## Ignore volatile fields when adapting TTL
 
@@ -109,11 +111,12 @@ const cache = new AdaptiveCache({
     async: true,
     skipCompressed: true,
     onlyIfSmaller: true,
+    maxDecodedBytes: 64 * 1024 * 1024,
   },
 })
 ```
 
-The byte threshold applies to the serialized payload. Already-compressed buffers are detected for gzip, ZIP, PNG, JPEG, and WebP. `onlyIfSmaller` accounts for base64 storage overhead. Asynchronous gzip keeps compression work off the JavaScript thread. JSON serialization and fingerprinting remain synchronous.
+The byte threshold applies to the serialized payload. Already-compressed buffers are detected for gzip, ZIP, PNG, JPEG, and WebP. `onlyIfSmaller` accounts for base64 storage overhead. Asynchronous gzip keeps compression work off the JavaScript thread. JSON serialization and fingerprinting remain synchronous. Writes and decoded reads reject serialized payloads above `maxDecodedBytes`, which defaults to 64 MiB and applies to marked, legacy, compressed, and plain entries. Encoded gzip input is also length-checked before base64 allocation.
 
 Entries written using `compression` carry a codec marker, so readers can decode them regardless of their compression settings. Existing boolean `compress` behavior remains supported; old entries require the matching legacy setting. `compress: false` disables compression even when selective options are supplied. Buffers, strings, JSON values, and `undefined` retain their types.
 
@@ -147,7 +150,7 @@ Custom backends may implement `fetchMany(inputs)`, returning one result or `null
 
 Upgrading Fastify deployments to 0.3.0 requires clearing old response entries or choosing a new namespace. Fastify 5 consumers need version 5.12.6 or later; Fastify 4 remains supported. Follow the [0.3.0 upgrade instructions](releases.md#upgrading-to-030).
 
-Default HTTP keys contain `<prefix>authority:<sha256(authority)>:<path>:<sha256(normalized-query)>:`. Authority comes from `Host`, with `:authority` as a fallback, and is trimmed and lowercased. The port remains part of identity. Forwarded host headers are not implicitly trusted. Query keys are sorted and `refresh` is ignored by default. Custom `key(request)` functions replace authority/path/query identity and must include any required host or tenant isolation themselves. Declared header variations append their own hash.
+Default HTTP keys contain `<prefix>authority:<sha256(authority)>:<path>:<sha256(normalized-query)>:`. Authority comes from `Host`, with `:authority` as a fallback, and is trimmed and lowercased. The port remains part of identity. Forwarded host headers are not implicitly trusted. Query keys are sorted. Only scalar `refresh=true` is treated as a control parameter and ignored by default; other `refresh` values remain part of the key. An explicit `ignoreQueryParams` list removes every named parameter regardless of value. Paths over 1024 UTF-8 bytes use a SHA-256 representation. Custom `key(request)` functions replace authority/path/query identity and must include any required host or tenant isolation themselves. Declared header variations append their own hash.
 
 Both middleware factories accept an injected `cache`, a custom `key(request)`, declared `varyBy` headers (or a function returning a key dimension), and `shouldCache(request, response?)`. Header dimensions are case-insensitive. Custom keys remain inside the middleware prefix.
 
@@ -159,7 +162,7 @@ const productResponses = adaptiveExpressCache({
   keyPrefix: 'catalog:',
   key: (req) => `product:${req.params?.id}`,
   varyBy: ['Accept-Language'],
-  loader: (req) => loadProduct(req.params?.id),
+  loader: (req, { signal }) => loadProduct(req.params?.id, { signal }),
   staleWhileRevalidate: 30,
   staleIfError: 120,
 })
@@ -174,7 +177,7 @@ Custom key functions must return a nonempty string. Invalid results bypass cachi
 
 Cached responses replay only `Cache-Control`, `Content-Encoding`, `Content-Language`, `Content-Type`, `ETag`, `Last-Modified`, and `Vary`, along with status and body. Arbitrary application headers are not replayed. Node and WHATWG streams bypass storage. Explicit HTTP loaders can cache JSON-compatible plain objects/arrays, finite numbers, booleans, null, strings, and buffers. ArrayBuffer views, including typed arrays and DataView, normalize to buffers before sending and storage. Native `Response`, `Blob`, `ArrayBuffer`, Date, and other objects whose native metadata cannot be replayed bypass storage; the framework still determines how to send them. Unsupported native or consumable results also bypass sharing. Each request calls its loader once and receives its own result, so loaders returning streams or native responses must create an independent result per invocation. Direct API serialization is a separate contract.
 
-Normal middleware continues to intercept the route handler response. Optional `loader(request)` mode coalesces eligible source work using `getOrSet`. Express loaders support background stale refresh. Fastify validates final response policy in `onResponse`, after all serialization and send hooks; followers await that verdict before receiving a shared candidate. Each response receives an independent body, and raw bodies and pre-hook metadata are replayed so transformations run once per request. Final status and headers govern storage and negative TTLs. Call `.flush()` when a subsequent operation must observe completed writes.
+Normal middleware continues to intercept the route handler response. Optional `loader(request, { signal })` mode coalesces eligible source work using `getOrSet`. Pass the signal to cancellable source I/O. It aborts when no HTTP caller still needs the load or the adapter deadline expires. Express loaders support background stale refresh. Fastify validates final response policy in `onResponse`, after all serialization and send hooks; followers await that verdict before receiving a shared candidate. Each response receives an independent body, and raw bodies and pre-hook metadata are replayed so transformations run once per request. Final status and headers govern storage and negative TTLs. Call `.flush()` when a subsequent operation must observe completed writes.
 
 Raw bodies must round-trip as ordinary mutable JSON trees. Getters, custom `toJSON`, hidden or symbol metadata, proxies, cycles, repeated object references, undefined fields, negative zero, sparse arrays, nonstandard property attributes, and excessive nesting bypass copying and caching so framework hooks retain their original behavior. Binary bodies are cached only as bare top-level transports; nested buffers/views and buffers with custom metadata or prototypes bypass caching. Fastify handlers that install a per-response `reply.serializer()` also bypass caching because that serializer would be absent when a hit skips the handler.
 

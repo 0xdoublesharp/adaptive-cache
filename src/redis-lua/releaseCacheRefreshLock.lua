@@ -6,12 +6,12 @@ local lockValue = ARGV[2]  -- The unique lock value expected
 -- Get the current lock value
 local existingLock = redis.call("GET", lockKey)
 
--- If the lock value matches, update the timestamp and delete the lock
-if not existingLock or existingLock == lockValue then
+-- Only the live owner may record refresh success and release the lock.
+if existingLock == lockValue then
     -- Loader locks do not need the public refresh helper's timestamp marker.
     if ARGV[3] ~= '0' then redis.call("SET", lastUpdateKey, currentTime) end
     redis.call("DEL", lockKey)
     return {"UPDATED"}
 else
-    return {"LOCK_MISMATCH", existingLock}
+    return {"LOCK_MISMATCH", existingLock or ""}
 end

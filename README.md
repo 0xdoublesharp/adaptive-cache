@@ -101,6 +101,8 @@ await users.clear({
 })
 ```
 
+Writes and invalidation accept at most 1024 tags. Each tag must be a non-empty string no larger than 4096 UTF-8 bytes, and the encoded tag list must not exceed 256 KiB. Duplicate tags are normalized before storage and invalidation.
+
 Default keys include lowercased request authority, including its port, plus path and normalized query. Include the original Host header when clearing. `.clear(request)` also reproduces custom keys and header variations on the same cache instance.
 
 For a default key, the legacy helper accepts authority as an optional fifth argument:
@@ -182,7 +184,13 @@ const cache = new AdaptiveCache({
   staleWhileRevalidate: 30,
   staleIfError: 120,
   ttlJitter: 0.1,
-  compression: { minBytes: 1024, async: true, skipCompressed: true, onlyIfSmaller: true },
+  compression: {
+    minBytes: 1024,
+    async: true,
+    skipCompressed: true,
+    onlyIfSmaller: true,
+    maxDecodedBytes: 64 * 1024 * 1024,
+  },
 })
 
 const product = await cache.getOrSet('catalog:product:42', () => loadProduct('42'), {
@@ -212,7 +220,7 @@ const products = adaptiveExpressCache({
   keyPrefix: 'catalog:',
   key: (req) => `product:${req.params?.id}`,
   varyBy: ['Accept-Language'],
-  loader: (req) => loadProduct(req.params?.id),
+  loader: (req, { signal }) => loadProduct(req.params?.id, { signal }),
   staleWhileRevalidate: 30,
 })
 app.get('/products/:id', products)
@@ -367,7 +375,23 @@ await fastify.register(
 
 Adaptive metadata stays in separate bounded LRU entries for `metaTTL`, allowing unchanged data to increase its TTL after the payload expires. All state is volatile and local to the host.
 
-Lock acquisition is atomic on the cluster primary. Release checks the lock value before deleting it, but those operations are separate and can race with lock replacement. Use a Redis-backed mode when strict refresh coordination is required.
+Lock acquisition and release run on the cluster primary. Release compares the live owner, records completion when requested, and deletes the lease in one synchronous operation, so an old owner cannot delete a successor's lease. Locks remain volatile and may expire or be evicted; Redis-backed modes also provide atomic write fencing across hosts.
+
+In a Node cluster, initialize the primary before forking workers:
+
+```typescript
+import cluster from 'node:cluster'
+import { bootstrapClusteredLru } from '@0xdoublesharp/adaptive-cache'
+
+if (cluster.isPrimary) {
+  bootstrapClusteredLru()
+  cluster.fork()
+} else {
+  // Create the application's clustered-LRU cache here.
+}
+```
+
+This initializes both the peer's cache IPC and adaptive-cache's atomic release handler. Standalone use initializes automatically. Worker lock acquisition rejects if the primary has no release handler. L1 Redis delegates leases to Redis and needs no additional lock handler. Internal control reads bypass local L1; atomic releases do not contribute to the peer's set/delete statistics.
 
 ## LRU memory limits
 
@@ -440,7 +464,8 @@ Use `localL1: true` for the dependency's default local-cache settings.
 | `backend`               | `'redis' \| 'l1-redis' \| 'clustered-lru' \| AdaptiveCacheBackend` | `'redis'`     | Cache backend.                                                                        |
 | `lru`                   | `AdaptiveCacheLruOptions`                                          | unset         | LRU options for `l1-redis` and `clustered-lru`.                                       |
 | `l1Redis.writeMode`     | `'async' \| 'await-redis'`                                         | `'async'`     | Whether `l1-redis` returns after L1 write or waits for Redis reconciliation.          |
-| `ignoreQueryParams`     | `string[]`                                                         | `['refresh']` | Query parameters excluded from middleware cache-key hashes.                           |
+| `redis.maxTagCleanupKeys` | `number`                                                         | `10000`       | Maximum key memberships processed by one Redis tag invalidation.                      |
+| `ignoreQueryParams`     | `string[]`                                                         | `['refresh']` | Explicitly named parameters to exclude. By default, only scalar `refresh=true` is excluded. |
 
 Additional options shared by the cache and adapters:
 
@@ -452,12 +477,14 @@ Additional options shared by the cache and adapters:
 | `lockWaitTimeoutMs`            | `5000`  | Maximum loader lock wait in milliseconds.                                                      |
 | `ttlJitter`                    | `0`     | Fraction from 0 to 1 by which to randomly shorten freshness.                                   |
 | `fingerprint` / `ignoreFields` | unset   | Custom content fingerprint or dotted fields excluded from the hash.                            |
-| `compression`                  | unset   | `minBytes`, `async`, `skipCompressed`, and `onlyIfSmaller` selective codec settings.           |
+| `compression`                  | unset   | Selective codec settings, including the 64 MiB default `maxDecodedBytes` payload ceiling.       |
 | `onEvent`                      | unset   | Observer for cache activity; also available through `cache.onEvent()`.                         |
 
 `loadTimeoutMs` defaults to `30000` milliseconds and `closeTimeoutMs` to `5000` milliseconds. Deadline options accept values from `0` through `2147483647`; per-call options override instance defaults.
 
 HTTP-only options are `cache`, `loader`, `key`, `varyBy`, `shouldCache`, `cacheAuthenticated`, `cacheCookies`, and request-derived `tags`. Defaults bypass authenticated/cookie requests and use authority, path, and query keys. Custom keys must provide authority or tenant isolation. See the [feature guide](docs/cache-features.md) for examples and per-call overrides.
+
+The default HTTP identity treats only scalar `?refresh=true` as a control parameter. Other `refresh` values remain part of the key. Supplying `ignoreQueryParams` explicitly removes every named parameter, regardless of value. Request paths over 1024 UTF-8 bytes are represented by a SHA-256 digest so attacker-controlled paths cannot create unbounded LRU key accounting.
 
 ## Headers
 

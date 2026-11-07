@@ -18,7 +18,7 @@ import {
   snapshotHttpResponse,
 } from './httpPolicy'
 import { AdaptiveCache } from './AdaptiveCache'
-import { AdaptiveCacheLoadOptions, AdaptiveCacheOptions } from './types'
+import { AdaptiveCacheLoaderContext, AdaptiveCacheLoadOptions, AdaptiveCacheOptions } from './types'
 
 export type FastifyRequestLike = {
   method?: string
@@ -46,7 +46,7 @@ export type AdaptiveFastifyCacheOptions<Req extends FastifyRequestLike = Fastify
   HttpPolicyOptions<Req> & {
     cache?: AdaptiveCache
     tags?: string[] | ((req: Req) => string[])
-    loader?: (req: Req) => Promise<unknown>
+    loader?: (req: Req, context: AdaptiveCacheLoaderContext) => Promise<unknown>
   }
 
 export type AdaptiveFastifyCachePlugin<Req extends FastifyRequestLike = FastifyRequestLike> = ((
@@ -139,10 +139,6 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
   let closed = false
   let closePromise: Promise<void> | undefined
 
-  if (typeof options.lockExpirationSeconds === 'number') {
-    AdaptiveCache.setDefaultLockExpirationSeconds(options.lockExpirationSeconds)
-  }
-
   const trackWrite = (promise: Promise<unknown>) => {
     pendingWrites.add(promise)
     const forget = () => pendingWrites.delete(promise)
@@ -185,7 +181,7 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
     const handleRequest = async (req: Req, reply: FastifyReplyLike) => {
       let cancelPublication = () => {}
       const { loadOnce, wait, remaining } = createHttpLoader(
-        () => loader!(req),
+        (context) => loader!(req, context),
         cacheInstance.resolveLoadTimeoutMs(options),
       )
       const serveBypass = async (diagnostic: 'BYPASS' | 'RETRY' = 'BYPASS') => {
@@ -275,8 +271,8 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
           }
           const value = await cacheInstance.getOrSet(
             adaptiveCacheKey,
-            async () => {
-              const body = await loadOnce()
+            async (context) => {
+              const body = await loadOnce(context)
               if (!active || !responseCacheable(req, loaderResponse) || !isCacheableHttpBody(body))
                 return UNSHAREABLE_HTTP_RESULT
               const candidate = encodeHttpResponse(

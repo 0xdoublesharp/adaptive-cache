@@ -7,6 +7,15 @@ const namespace = (name: string) => `adaptive-cache-backend-${name}-${Date.now()
 const logger = () => new Logger('silent')
 
 describe('ClusteredLruAdaptiveCacheBackend edge cases', () => {
+  it.each([
+    { maxSizeBytes: 0 },
+    { maxSizeBytes: Number.POSITIVE_INFINITY },
+    { maxEntrySizeBytes: -1 },
+    { maxSizeBytes: 100, maxEntrySizeBytes: 101 },
+  ])('rejects invalid clustered-LRU byte limits %o', (options) => {
+    expect(() => new ClusteredLruAdaptiveCacheBackend(options, logger())).toThrow(RangeError)
+  })
+
   it('should use safe defaults and pass through v2.1 local L1 options', async () => {
     const originalLoader = ClusteredLruAdaptiveCacheBackend.loadModule
     const constructorOptions: any[] = []
@@ -99,6 +108,100 @@ describe('ClusteredLruAdaptiveCacheBackend edge cases', () => {
     expect(await backend.releaseLock('lru-last-update', 101, 'wrong-lock')).toEqual(['LOCK_MISMATCH', 'lock-d'])
   })
 
+  it.each([false, true])('fails boundedly when force=%s cannot retain an oversized refresh lock', async (force) => {
+    const backend = new ClusteredLruAdaptiveCacheBackend(
+      { namespace: namespace('oversized-lock'), maxSizeBytes: 1024, maxEntrySizeBytes: 128 },
+      logger(),
+    )
+
+    await expect(backend.shouldRefresh('x'.repeat(512), 0, 100, force, 1, 'owner')).rejects.toThrow(
+      'cannot retain refresh lock',
+    )
+    await backend.quit()
+  })
+
+  it.each([false, true])('preserves a successor acquired during release with recordRefresh=%s', async (recordRefresh) => {
+    const backend = new ClusteredLruAdaptiveCacheBackend(
+      { namespace: namespace('release-successor'), maxSizeBytes: 1024 * 1024 },
+      logger(),
+    )
+    const cache = await (backend as any).getCache()
+    const primary = cache.getCache()
+    const key = 'release-successor'
+    const lockKey = key + '-lock'
+    await backend.shouldRefresh(key, 0, 100, false, 60, 'owner')
+    const get = primary.get.bind(primary)
+    const spy = vi.spyOn(primary, 'get').mockImplementation((requested: string) => {
+      const value = get(requested)
+      if (requested === lockKey) {
+        // A new primary operation may run as soon as release yields. It must
+        // observe the entire release, never just its ownership read.
+        globalThis.queueMicrotask(() => primary.set(lockKey, 'successor', { ttl: 60_000, size: 128 }))
+      }
+      return value
+    })
+    try {
+      expect(await backend.releaseLock(key, 100, 'owner', recordRefresh)).toEqual(['UPDATED'])
+      spy.mockRestore()
+      expect(primary.get(lockKey)).toBe('successor')
+      expect(primary.get(key)).toBe(recordRefresh ? 100 : undefined)
+      expect(await backend.releaseLock(key, 101, 'owner', recordRefresh)).toEqual(['LOCK_MISMATCH', 'successor'])
+      expect(primary.get(lockKey)).toBe('successor')
+    } finally {
+      spy.mockRestore()
+      await backend.quit()
+    }
+  })
+
+  it('does not claim a refresh lock whose readback belongs to a successor', async () => {
+    const backend = new ClusteredLruAdaptiveCacheBackend(
+      { namespace: namespace('lock-readback'), maxSizeBytes: 1024 * 1024 },
+      logger(),
+    )
+    const primary = await (backend as any).getCache()
+    await primary.set('readback-lock', 'successor', { ttl: 1000, size: 64 })
+    const claim = vi.spyOn(primary, 'setIfAbsent').mockResolvedValueOnce(true)
+    expect(await backend.shouldRefresh('readback', 0, 100, false, 1, 'owner')).toEqual(['UPDATING', 'successor'])
+    claim.mockRestore()
+
+    const force = vi.spyOn(primary, 'set').mockResolvedValueOnce(true)
+    await expect(backend.shouldRefresh('readback', 0, 100, true, 1, 'owner')).rejects.toThrow(
+      'cannot retain refresh lock',
+    )
+    force.mockRestore()
+    await backend.quit()
+  })
+
+  it('rejects invalidation state that cannot fit in the configured entry budget', async () => {
+    const backend = new ClusteredLruAdaptiveCacheBackend(
+      { namespace: namespace('oversized-state'), maxSizeBytes: 1024, maxEntrySizeBytes: 128 },
+      logger(),
+    )
+    const long = 'x'.repeat(512)
+
+    await expect(backend.invalidateNamespace(long)).rejects.toThrow('cannot retain invalidation state')
+    await expect(backend.clear(long, long + 'data', long + 'meta', 'a:')).rejects.toThrow(
+      'cannot retain invalidation state',
+    )
+    await expect(backend.clear('key', 'keydata', 'keymeta', long)).rejects.toThrow(
+      'cannot retain invalidation state',
+    )
+    await expect(backend.invalidateTags([long], 'a:')).rejects.toThrow('cannot retain invalidation state')
+    await backend.quit()
+  })
+
+  it.each(['rejected', 'lost'])('rejects invalidation state when its write is %s', async (mode) => {
+    const backend = new ClusteredLruAdaptiveCacheBackend(
+      { namespace: namespace('unretained-state'), maxSizeBytes: 1024 * 1024 },
+      logger(),
+    )
+    const primary = await (backend as any).getCache()
+    vi.spyOn(primary, 'set').mockResolvedValueOnce(mode === 'lost')
+
+    await expect(backend.invalidateNamespace('a:')).rejects.toThrow('cannot retain invalidation state')
+    await backend.quit()
+  })
+
   it('should cap TTL at maxTTL', async () => {
     const backend = new ClusteredLruAdaptiveCacheBackend(
       { namespace: namespace('ttl-cap'), maxSizeBytes: 1024 * 1024 },
@@ -158,6 +261,35 @@ describe('ClusteredLruAdaptiveCacheBackend edge cases', () => {
     await backend.hydrateFromUpdate(updateInput, ['CACHED', false, false, false, false] as any)
     expect((await backend.fetch(fetchInput))?.metadata?.hash).toBe('fallback-hash')
     expect(await backend.invalidateTags(['missing-tag'], 'adaptive:')).toEqual([])
+  })
+
+  it('does not index oversized conservative or reconciled entries', async () => {
+    const backend = new ClusteredLruAdaptiveCacheBackend(
+      { namespace: namespace('oversized-hydration'), maxSizeBytes: 1024 * 1024, maxEntrySizeBytes: 1024 },
+      logger(),
+    )
+    const makeInput = (key: string) => ({
+      key,
+      dataKey: key + 'data',
+      metaKey: key + 'meta',
+      redisPrefix: 'adaptive:',
+      encodedData: 'x'.repeat(2048),
+      responseHash: 'oversized',
+      initialTTL: 3,
+      maxTTL: 60,
+      ttlScaling: 2,
+      metaTTL: 100,
+      tags: ['red'],
+    })
+
+    await backend.storeConservative(makeInput('conservative'))
+    await backend.hydrateFromUpdate(makeInput('reconciled'), ['CACHED', 3, 1, 1, 'oversized', 1])
+
+    expect(await backend.fetch({ ...makeInput('conservative'), includeDebugHeaders: true })).toBeNull()
+    expect(await backend.fetch({ ...makeInput('reconciled'), includeDebugHeaders: true })).toBeNull()
+    const primary = await (backend as any).getCache()
+    expect(await primary.get('adaptive:tag:red', { bypassL1: true })).toBeUndefined()
+    await backend.quit()
   })
 
   it('should no-op quit before clustered LRU initialization', async () => {

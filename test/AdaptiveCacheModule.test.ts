@@ -153,10 +153,10 @@ describe('AdaptiveCache Class & Utils', () => {
       cacheModule.setDefaultLockExpirationSeconds(60)
     })
 
-    it('should set default lock expiration from options', async () => {
+    it('should keep adapter lock expiration instance-local', async () => {
       const spy = vi.spyOn(cacheModule.AdaptiveCache, 'setDefaultLockExpirationSeconds')
       cacheModule.adaptiveExpressCache({ lockExpirationSeconds: 123 })
-      expect(spy).toHaveBeenCalledWith(123)
+      expect(spy).not.toHaveBeenCalled()
     })
   })
 

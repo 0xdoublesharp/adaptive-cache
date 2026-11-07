@@ -56,7 +56,7 @@ describe('Clustered LRU backend', () => {
       lru: {
         namespace: namespace('lru-oversized'),
         maxSizeBytes: 1024,
-        maxEntrySizeBytes: 64,
+        maxEntrySizeBytes: 256,
       },
     })
 
