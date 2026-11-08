@@ -83,4 +83,4 @@ BENCH_MODES=worker BENCH_READS=10000 BENCH_BATCHES=2000 pnpm run bench:lru
 
 Keep adaptive-cache and all other runtime dependencies identical, use separate roots for 2.1.0 and 2.1.1, and alternate runs sequentially. The benchmark emits JSON including exact IPC counts and correctness results. The original run recorded thirty samples, including the backpressure failure on 2.1.0. Raw run evidence is kept outside the repository. The benchmark intentionally reports that diagnostic result without aborting baseline timing runs; compare its `backpressure.passed` fields explicitly.
 
-Sources: [upstream changes](https://github.com/doublesharp/lru-cache-clustered/compare/v2.1.0...v2.1.1), [2.1.1 publication](https://github.com/doublesharp/lru-cache-clustered/actions/runs/34627235700).
+Sources: [upstream changes](https://github.com/0xdoublesharp/lru-cache-clustered/compare/v2.1.0...v2.1.1), [2.1.1 publication](https://github.com/0xdoublesharp/lru-cache-clustered/actions/runs/34627235700).
