@@ -2,7 +2,7 @@
 minimumReleaseAge: 10080
 # Keep development-tool security fixes scoped until upstream ranges catch up.
 overrides:
-  'vitest>vite': 8.3.3
+  'vitest>vite': 8.3.5
   'tsup>esbuild': 0.28.2
   'archiver-utils>glob': 14.0.3
   '@typescript-eslint/typescript-estree>minimatch': 11.0.3

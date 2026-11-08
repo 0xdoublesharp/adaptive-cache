@@ -2,8 +2,8 @@
 
 [![npm version](https://img.shields.io/npm/v/@0xdoublesharp/adaptive-cache.svg)](https://www.npmjs.com/package/@0xdoublesharp/adaptive-cache)
 [![npm downloads](https://img.shields.io/npm/dm/@0xdoublesharp/adaptive-cache.svg)](https://npm-stat.com/charts.html?package=%400xdoublesharp%2Fadaptive-cache)
-[![CI](https://github.com/0xdoublesharp/adaptive-cache/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/0xdoublesharp/adaptive-cache/actions?query=workflow%3ACI+branch%3Amain)
-[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2F0xdoublesharp.github.io%2Fadaptive-cache%2Fcoverage-badge.json)](https://0xdoublesharp.github.io/adaptive-cache/coverage/)
+[![CI](https://github.com/0xdoublesharp/adaptive-cache/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/0xdoublesharp/adaptive-cache/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
+[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2F0xdoublesharp.github.io%2Fadaptive-cache%2Fcoverage-badge.json&label=coverage&cacheSeconds=300)](https://0xdoublesharp.github.io/adaptive-cache/coverage/)
 [![license](https://img.shields.io/github/license/0xdoublesharp/adaptive-cache.svg)](https://github.com/0xdoublesharp/adaptive-cache/blob/main/LICENSE)
 
 Server-side caching with TTLs that adapt to how often your data changes.
@@ -13,6 +13,8 @@ Use `@0xdoublesharp/adaptive-cache` with Express, Fastify, or directly in applic
 Redis is the default backend. Add a bounded LRU layer to keep hot payloads in memory, or use clustered LRU alone for a single server or Node cluster. Redis-backed modes provide atomic write and refresh-lock checks across hosts. Clustered LRU has weaker coordination guarantees and keeps state on one host.
 
 Use middleware for response caching and `getOrSet` for expensive work that needs concurrent request coalescing, stale refresh, or negative caching. Express loaders and direct `getOrSet` calls support background refresh. Fastify refreshes run in the foreground so response hooks can approve sharing and storage. The cache honors HTTP storage restrictions but does not generate `Cache-Control` headers.
+
+Writes and decoded reads accept up to 64 MiB of serialized payload by default. Redis tag cleanup also has a per-call work limit. Set `compression.maxDecodedBytes` and `redis.maxTagCleanupKeys` to match your workload; see [configuration](#configuration).
 
 See the [feature guide](docs/cache-features.md) for loading, invalidation, and HTTP policy, or the [TTL policy reference](docs/ttl-policies.md) for tuning freshness.
 
