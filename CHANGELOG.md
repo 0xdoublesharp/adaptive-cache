@@ -2,6 +2,13 @@
 
 Notable changes by version. See [releases and maintenance](docs/releases.md) for the release workflow and compatibility reference.
 
+## 0.4.1 - 2026-11-08
+
+### Changed
+
+- Update `@0xdoublesharp/lru-cache-clustered` to 2.1.3 and require optional peer version `^2.1.3` for LRU-backed modes.
+- Allow the newly published 2.1.3 release through the seven-day dependency wait period with an exact-version exception.
+
 ## 0.4.0 - 2026-11-08
 
 ### Added

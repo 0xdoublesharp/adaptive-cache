@@ -1,5 +1,8 @@
 # Wait seven days after publication before resolving dependency releases.
 minimumReleaseAge: 10080
+# Explicitly approved release-age exception for the newly published clustered LRU.
+minimumReleaseAgeExclude:
+  - '@0xdoublesharp/lru-cache-clustered@2.1.3'
 # Keep development-tool security fixes scoped until upstream ranges catch up.
 overrides:
   'vitest>vite': 8.3.5
