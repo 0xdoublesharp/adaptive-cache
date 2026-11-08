@@ -1,6 +1,6 @@
 {
   "name": "@0xdoublesharp/adaptive-cache",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Adaptive caching module for Redis with Fastify and Express integration",
   "author": "Justin Silver",
   "license": "MIT",

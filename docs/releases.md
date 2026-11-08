@@ -28,6 +28,17 @@ Default HTTP identity excludes only scalar `refresh=true`. Other refresh values 
 
 These version-specific notes describe changes from earlier releases. Use the current feature documentation for a new installation.
 
+### Upgrading to 0.4.0
+
+Version 0.4.0 adds configurable resource limits and atomic clustered-LRU lease release. See the [0.4.0 changelog](../CHANGELOG.md#040---2026-11-08) for the full release notes.
+
+1. Call `bootstrapClusteredLru()` in the Node cluster primary before forking workers that acquire clustered-LRU leases. It initializes both cache IPC and the atomic release handler; worker lock acquisition rejects when that handler is missing. Standalone use initializes automatically, and L1 Redis continues to use Redis for leases.
+2. Review payload sizes against the 64 MiB default `compression.maxDecodedBytes` ceiling. The limit applies to serialized writes and decoded reads, including existing entries and the base64 representation of buffers. Configure a different ceiling consistently across writers and readers when needed.
+3. Keep tag input within 1024 non-empty strings, 4096 UTF-8 bytes per tag, and 256 KiB for the encoded list. Redis tag invalidation processes at most 10000 memberships per call by default, counting a key once for each requested tag it belongs to. Handle cleanup-limit rejection and tune `redis.maxTagCleanupKeys` for the application's tag cardinality. Epoch invalidation still protects versioned entries when physical cleanup rejects.
+4. Account for default HTTP identity changes: only scalar `refresh=true` is excluded, other refresh values remain in the key, and paths over 1024 UTF-8 bytes are hashed. An explicit `ignoreQueryParams` list still excludes every named parameter regardless of value. Entries under affected older keys may stop matching; let them expire or clear their namespace.
+
+When upgrading from a release earlier than 0.3.0, also follow the relevant notes below.
+
 ### Upgrading to 0.3.0
 
 Version 0.3.0 fixes HTTP response privacy and replay, backend TTL parity, and cache-write serialization. The minor version marks changes to Fastify refresh behavior and stored response representations. See the [0.3.0 changelog](../CHANGELOG.md#030---2026-10-23).

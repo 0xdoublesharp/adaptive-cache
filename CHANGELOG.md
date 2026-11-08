@@ -1,8 +1,8 @@
 # Changelog
 
-Notable changes awaiting release and by version. See [releases and maintenance](docs/releases.md) for the release workflow and compatibility reference.
+Notable changes by version. See [releases and maintenance](docs/releases.md) for the release workflow and compatibility reference.
 
-## Unreleased
+## 0.4.0 - 2026-11-08
 
 ### Added
 
@@ -12,6 +12,7 @@ Notable changes awaiting release and by version. See [releases and maintenance](
 
 ### Changed
 
+- Refresh the Vite tooling override to 8.3.5 under the seven-day release-age policy.
 - Refresh eligible same-major development dependencies and transitive resolutions under the seven-day release-age policy: Node types 26.6.6, TypeScript ESLint parser/plugin 8.72.1, Vitest and its coverage provider 5.0.5, ESLint 10.14.0, Express 5.3.0, Prettier 3.9.10, and Testcontainers 12.2.1.
 - Align the package-manager pin and all CI workflows on pnpm 10.34.9. Retain TypeScript 6.0.3 for parser compatibility and tsup 8.5.1 within the supported major.
 - Remove the expired clustered-LRU release-age exception and apply scoped development-tool overrides for the glob cancellation and minimatch pattern-amplification advisories.
@@ -28,7 +29,9 @@ Notable changes awaiting release and by version. See [releases and maintenance](
 - Reject invalid lock lifetimes, remove lease values from logs, and require a live matching lease before recording refresh completion.
 - Scope coverage workflow permissions and Codecov credentials to the jobs and steps that use them, and bind the local Compose Redis port to loopback.
 
-Cluster primaries using clustered leases must call `bootstrapClusteredLru()` before forking workers. See [deployment compatibility](docs/releases.md#deployment-compatibility) for the current limits and rollout considerations.
+### Compatibility notes
+
+Cluster primaries using clustered leases must call `bootstrapClusteredLru()` before forking workers. Payload and tag operations now enforce resource limits, and default HTTP identity retains non-control refresh values. See [upgrading to 0.4.0](docs/releases.md#upgrading-to-040) for rollout considerations.
 
 ## 0.3.0 - 2026-10-23
 
