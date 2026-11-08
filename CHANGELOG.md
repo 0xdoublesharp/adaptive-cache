@@ -163,7 +163,7 @@ This version adds loader and cache-policy APIs and changes the Redis format and 
 
 ## 0.0.6 - 2026-05-15
 
-[Changes since 0.0.5](https://github.com/doublesharp/adaptive-cache/compare/v0.0.5...v0.0.6)
+[Changes since 0.0.5](https://github.com/0xdoublesharp/adaptive-cache/compare/v0.0.5...v0.0.6)
 
 ### Added
 
@@ -190,7 +190,7 @@ This version adds loader and cache-policy APIs and changes the Redis format and 
 
 ## 0.0.5 - 2026-05-12
 
-[Changes since 0.0.4](https://github.com/doublesharp/adaptive-cache/compare/f28211e770fd9f4c6484c0a2c39bf1cf81a47cea...v0.0.5)
+[Changes since 0.0.4](https://github.com/0xdoublesharp/adaptive-cache/compare/f28211e770fd9f4c6484c0a2c39bf1cf81a47cea...v0.0.5)
 
 ### Added
 
@@ -215,13 +215,13 @@ This version adds loader and cache-policy APIs and changes the Redis format and 
 
 ## 0.0.4 - 2025-11-23
 
-[Version commit](https://github.com/doublesharp/adaptive-cache/commit/f28211e770fd9f4c6484c0a2c39bf1cf81a47cea)
+[Version commit](https://github.com/0xdoublesharp/adaptive-cache/commit/f28211e770fd9f4c6484c0a2c39bf1cf81a47cea)
 
 - Package version bump only. No source, test, or dependency changes from 0.0.3.
 
 ## 0.0.3 - 2025-11-23
 
-[Changes since 0.0.2](https://github.com/doublesharp/adaptive-cache/compare/98c7f112394a711e373f3ed5b58c65821c488294...9a60da6980fa9c6cf010c42555bf58281f02e850)
+[Changes since 0.0.2](https://github.com/0xdoublesharp/adaptive-cache/compare/98c7f112394a711e373f3ed5b58c65821c488294...9a60da6980fa9c6cf010c42555bf58281f02e850)
 
 ### Changed
 
@@ -231,14 +231,14 @@ This version adds loader and cache-policy APIs and changes the Redis format and 
 
 ## 0.0.2 - 2025-11-23
 
-[Changes since 0.0.1](https://github.com/doublesharp/adaptive-cache/compare/a4a3261e7209c80967097f9485bb2bc585cac008...98c7f112394a711e373f3ed5b58c65821c488294)
+[Changes since 0.0.1](https://github.com/0xdoublesharp/adaptive-cache/compare/a4a3261e7209c80967097f9485bb2bc585cac008...98c7f112394a711e373f3ed5b58c65821c488294)
 
 - Renamed the internal Express factory to `adaptiveExpressCache`, while retaining `adaptiveCache` as its package export alias.
 - Updated the `cache` and `cacheSuccess` wrappers to call the renamed factory and added standalone duration/key utility files.
 
 ## 0.0.1 - 2025-11-23
 
-[Initial version commit](https://github.com/doublesharp/adaptive-cache/commit/a4a3261e7209c80967097f9485bb2bc585cac008)
+[Initial version commit](https://github.com/0xdoublesharp/adaptive-cache/commit/a4a3261e7209c80967097f9485bb2bc585cac008)
 
 - Initial Redis-backed adaptive cache with response hashing, TTL growth/reset, gzip payloads, tag invalidation, and Lua refresh locks.
 - Express and Fastify integrations, shared Redis/cache helpers, fixed-duration `cacheResult`, and diagnostic headers.

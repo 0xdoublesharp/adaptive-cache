@@ -48,14 +48,14 @@ Version 0.1.0 includes changes after `v0.0.6`. The minor version marks the new l
 
 Git history records six prior package versions. Versions 0.0.1 through 0.0.4 have version commits but no local release tags. Versions 0.0.5 and 0.0.6 have tags. Dates below are UTC commit dates, not npm publication timestamps.
 
-| Version | Date       | Source revision                                                                                            | Scope                                                                  |
-| ------- | ---------- | ---------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
-| 0.0.1   | 2025-11-23 | [`a4a3261`](https://github.com/doublesharp/adaptive-cache/commit/a4a3261e7209c80967097f9485bb2bc585cac008) | Initial repository and package.                                        |
-| 0.0.2   | 2025-11-23 | [`98c7f11`](https://github.com/doublesharp/adaptive-cache/commit/98c7f112394a711e373f3ed5b58c65821c488294) | Diff after 0.0.1.                                                      |
-| 0.0.3   | 2025-11-23 | [`9a60da6`](https://github.com/doublesharp/adaptive-cache/commit/9a60da6980fa9c6cf010c42555bf58281f02e850) | Diff after 0.0.2, including export changes.                            |
-| 0.0.4   | 2025-11-23 | [`f28211e`](https://github.com/doublesharp/adaptive-cache/commit/f28211e770fd9f4c6484c0a2c39bf1cf81a47cea) | Package version bump only.                                             |
-| 0.0.5   | 2026-05-12 | [`v0.0.5`](https://github.com/doublesharp/adaptive-cache/tree/v0.0.5), `5b92262`                           | Changes after 0.0.4 through the tag; package version set in `35cfe63`. |
-| 0.0.6   | 2026-05-15 | [`v0.0.6`](https://github.com/doublesharp/adaptive-cache/tree/v0.0.6), `1adee3a`                           | Changes after v0.0.5, including the intervening README badge cleanup.  |
+| Version | Date       | Source revision                                                                                              | Scope                                                                  |
+| ------- | ---------- | ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------- |
+| 0.0.1   | 2025-11-23 | [`a4a3261`](https://github.com/0xdoublesharp/adaptive-cache/commit/a4a3261e7209c80967097f9485bb2bc585cac008) | Initial repository and package.                                        |
+| 0.0.2   | 2025-11-23 | [`98c7f11`](https://github.com/0xdoublesharp/adaptive-cache/commit/98c7f112394a711e373f3ed5b58c65821c488294) | Diff after 0.0.1.                                                      |
+| 0.0.3   | 2025-11-23 | [`9a60da6`](https://github.com/0xdoublesharp/adaptive-cache/commit/9a60da6980fa9c6cf010c42555bf58281f02e850) | Diff after 0.0.2, including export changes.                            |
+| 0.0.4   | 2025-11-23 | [`f28211e`](https://github.com/0xdoublesharp/adaptive-cache/commit/f28211e770fd9f4c6484c0a2c39bf1cf81a47cea) | Package version bump only.                                             |
+| 0.0.5   | 2026-05-12 | [`v0.0.5`](https://github.com/0xdoublesharp/adaptive-cache/tree/v0.0.5), `5b92262`                           | Changes after 0.0.4 through the tag; package version set in `35cfe63`. |
+| 0.0.6   | 2026-05-15 | [`v0.0.6`](https://github.com/0xdoublesharp/adaptive-cache/tree/v0.0.6), `1adee3a`                           | Changes after v0.0.5, including the intervening README badge cleanup.  |
 
 The 0.0.6 commit changed the existing 0.0.5 changelog heading and expanded its contents instead of retaining both entries. The reconstructed changelog separates the changes using the tagged diffs. It does not infer additional npm releases from commit messages.
 

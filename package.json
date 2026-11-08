@@ -6,12 +6,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/doublesharp/adaptive-cache.git"
+    "url": "git+https://github.com/0xdoublesharp/adaptive-cache.git"
   },
   "bugs": {
-    "url": "https://github.com/doublesharp/adaptive-cache/issues"
+    "url": "https://github.com/0xdoublesharp/adaptive-cache/issues"
   },
-  "homepage": "https://github.com/doublesharp/adaptive-cache#readme",
+  "homepage": "https://github.com/0xdoublesharp/adaptive-cache#readme",
   "keywords": [
     "adaptive",
     "cache",

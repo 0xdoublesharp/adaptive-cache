@@ -2,9 +2,9 @@
 
 [![npm version](https://img.shields.io/npm/v/@0xdoublesharp/adaptive-cache.svg)](https://www.npmjs.com/package/@0xdoublesharp/adaptive-cache)
 [![npm downloads](https://img.shields.io/npm/dm/@0xdoublesharp/adaptive-cache.svg)](https://npm-stat.com/charts.html?package=%400xdoublesharp%2Fadaptive-cache)
-[![CI](https://github.com/doublesharp/adaptive-cache/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/doublesharp/adaptive-cache/actions?query=workflow%3ACI+branch%3Amain)
-[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fdoublesharp.github.io%2Fadaptive-cache%2Fcoverage-badge.json)](https://doublesharp.github.io/adaptive-cache/coverage/)
-[![license](https://img.shields.io/github/license/doublesharp/adaptive-cache.svg)](https://github.com/doublesharp/adaptive-cache/blob/main/LICENSE)
+[![CI](https://github.com/0xdoublesharp/adaptive-cache/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/0xdoublesharp/adaptive-cache/actions?query=workflow%3ACI+branch%3Amain)
+[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2F0xdoublesharp.github.io%2Fadaptive-cache%2Fcoverage-badge.json)](https://0xdoublesharp.github.io/adaptive-cache/coverage/)
+[![license](https://img.shields.io/github/license/0xdoublesharp/adaptive-cache.svg)](https://github.com/0xdoublesharp/adaptive-cache/blob/main/LICENSE)
 
 Server-side caching with TTLs that adapt to how often your data changes.
 
