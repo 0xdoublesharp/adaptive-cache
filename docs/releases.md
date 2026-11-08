@@ -1,8 +1,34 @@
-# Release history and process
+# Releases and maintenance
 
-The [changelog](../CHANGELOG.md) records release changes. The [README](../README.md) and [feature guide](cache-features.md) describe usage. A local version bump does not publish the package; publication follows the release process below.
+The [README](../README.md), [feature guide](cache-features.md), and [TTL policy guide](ttl-policies.md) describe the current API and behavior. The [changelog](../CHANGELOG.md) records changes awaiting release and version history. Keep current-use documentation evergreen; retain version-specific changes in the upgrade reference below.
 
-## Upgrading to 0.3.0
+A local version bump does not publish the package. Publication follows the release process here.
+
+## Preparing a release
+
+1. Review changes since the last tag and keep user-visible additions, fixes, dependency changes, and migration notes under Unreleased throughout development.
+2. Install using the configured pnpm version and `pnpm install --frozen-lockfile`. Dependency updates must honor `minimumReleaseAge: 10080` and peer compatibility. Apply only the version-specific exceptions declared in workspace policy; keep other updates under the age floor. The policy governs this repository's resolution; consumers resolve package ranges under their own package-manager policy.
+3. Choose the next version based on compatibility impact, update `package.json`, and move the completed Unreleased notes into a new dated section. Retain all historical sections. Add an Unreleased section when development resumes. Keep the README and feature guide focused on current behavior, and put version-specific rollout instructions in the upgrade reference below.
+4. Run `pnpm run quality`, exercise the full suite on supported Node versions, run `pnpm run test:compat`, and inspect `npm pack --dry-run`. The suite requires Docker for Redis/Testcontainers tests. Inspect that the archive includes the built entry points, Lua scripts, README, changelog, license, and linked documentation.
+5. Record the commands and results for the actual release candidate; distinguish checks that passed from checks that did not run. Coverage measures exercised code, not correctness; retain the concurrency, invalidation, HTTP, and stored-TTL regression checks.
+6. Commit the release candidate and create a matching `v<version>` tag when ready to publish. Pushing a matching tag triggers [the publishing workflow](../.github/workflows/publish.yml), which checks the package version, installs, runs quality/tests, inspects the package, and publishes with provenance. After npm publishing succeeds, a separate job creates a GitHub release for the existing tag with automatically generated release notes. Tags with a prerelease suffix are marked as GitHub prereleases. The workflow does not generate changelog entries.
+7. If GitHub release creation fails after npm publishing succeeds, rerun only the failed jobs so npm publishing is not repeated. The release job skips tags that already have a GitHub release.
+
+## Deployment compatibility
+
+Clustered-LRU applications call `bootstrapClusteredLru()` in the Node cluster primary before forking workers. It initializes the peer's cache IPC and adaptive-cache's atomic release handler. Standalone use initializes automatically. Worker lock acquisition rejects if the handler is unavailable, while L1 Redis continues to use Redis for leases. See the [clustered-LRU setup](../README.md#clustered-lru).
+
+Payload writes and decoded reads accept up to 64 MiB by default, including existing encoded payloads. Set `compression.maxDecodedBytes` consistently across writers and readers when another ceiling is required. The limit applies to the serialized envelope, including base64 representation of buffers.
+
+Writes and invalidation accept at most 1024 non-empty tags, 4096 UTF-8 bytes per tag, and 256 KiB for the encoded list. Redis invalidation processes at most `redis.maxTagCleanupKeys` memberships per call, defaulting to 10000. Invalidating a larger snapshot rejects after its epoch has advanced; modern entries stay fenced, but physical cleanup is incomplete. Handle that rejection and choose a limit appropriate for the application's tag cardinality. See [invalidation behavior](cache-features.md#invalidate-without-resurrecting-old-work).
+
+Default HTTP identity excludes only scalar `refresh=true`. Other refresh values remain application inputs in the key; an explicit `ignoreQueryParams` list removes each named parameter regardless of value. Old default entries may stop matching when refresh values or long request paths are present. Let those entries expire or clear their namespace when adopting the current identity policy.
+
+## Upgrade reference
+
+These version-specific notes describe changes from earlier releases. Use the current feature documentation for a new installation.
+
+### Upgrading to 0.3.0
 
 Version 0.3.0 fixes HTTP response privacy and replay, backend TTL parity, and cache-write serialization. The minor version marks changes to Fastify refresh behavior and stored response representations. See the [0.3.0 changelog](../CHANGELOG.md#030---2026-10-23).
 
@@ -13,7 +39,7 @@ Version 0.3.0 fixes HTTP response privacy and replay, backend TTL parity, and ca
 
 There is no additional direct-cache payload migration from 0.2.1. Applications upgrading from 0.1.1 or earlier must also follow the 0.2.0 instructions below.
 
-## Upgrading to 0.2.1
+### Upgrading to 0.2.1
 
 Version 0.2.1 fixes cleanup after graceful Redis shutdown failures, failed or stalled clustered-cache initialization, and temporary invalidation-helper failures. It also adds fuzz and invariant tests. There is no additional cache-format migration from the prepared 0.2.0 source. Applications upgrading from the published 0.1.1 release or earlier must also follow the 0.2.0 instructions below.
 
@@ -21,7 +47,7 @@ Continue awaiting and handling errors from `close()` and `quit()`. Cleanup now p
 
 Temporary clear helpers detach their observers without flushing or closing borrowed custom backends. Clustered backends cannot resume operations after closure, even if initialization finishes later. See [shutdown behavior](cache-features.md#observe-and-drain-work) and the [0.2.1 changelog](../CHANGELOG.md#021---2026-10-21).
 
-## Upgrading to 0.2.0
+### Upgrading to 0.2.0
 
 These steps cover the HTTP identity, loader lifetime, ownership, and invalidation changes. They apply in addition to the older upgrade instructions below.
 
@@ -36,15 +62,15 @@ These steps cover the HTTP identity, loader lifetime, ownership, and invalidatio
 
 LRU-backed modes require optional peer `@0xdoublesharp/lru-cache-clustered@^2.1.2` and `lru-cache@^11`; Redis-only consumers do not need them. Node.js >=22, Express 4/5, and Fastify 4/5 remain supported. PR CI adds Node 22/24 packed framework consumers and checks declaration resolution through the package name. These are local and CI verification targets, not deployment evidence.
 
-## Version 0.1.1
+### Version 0.1.1
 
 Version 0.1.1 optimizes clustered-LRU bulk reads. LRU-backed modes require the optional peer `@0xdoublesharp/lru-cache-clustered@^2.1.1`; Redis-only users do not need it. Existing `getMany()` callers use the optimized path automatically on clustered LRU. Redis and L1 Redis retain their existing read behavior. There is no additional wire-format migration from 0.1.0. Empty `getMany()` calls now reject after closure. See the [release notes](../CHANGELOG.md#011---2026-09-11) and [verification report](batched-reads-0.1.1.md).
 
-## Version 0.1.0
+### Version 0.1.0
 
 Version 0.1.0 includes changes after `v0.0.6`. The minor version marks the new loader and policy APIs, Redis wire-format change, and stricter HTTP caching defaults. See the [release notes](../CHANGELOG.md#010---2026-09-10) and [verification report](features-verification-2026-09-10.md).
 
-## Historical sources
+### Historical sources
 
 Git history records six prior package versions. Versions 0.0.1 through 0.0.4 have version commits but no local release tags. Versions 0.0.5 and 0.0.6 have tags. Dates below are UTC commit dates, not npm publication timestamps.
 
@@ -59,7 +85,7 @@ Git history records six prior package versions. Versions 0.0.1 through 0.0.4 hav
 
 The 0.0.6 commit changed the existing 0.0.5 changelog heading and expanded its contents instead of retaining both entries. The reconstructed changelog separates the changes using the tagged diffs. It does not infer additional npm releases from commit messages.
 
-## Upgrading from 0.0.6
+### Upgrading from 0.0.6
 
 These steps apply when moving from 0.0.6 to 0.1.0 or 0.1.1.
 
@@ -76,13 +102,3 @@ These steps apply when moving from 0.0.6 to 0.1.0 or 0.1.1.
 New TTL policies are opt-in. Existing configurations retain the adaptive algorithm. Custom backends must implement and declare `supportsTtlPolicies` before selecting AIMD or EWMA. See [TTL policies](ttl-policies.md).
 
 The `metaTTL` option accepts positive integer seconds. Fractional values now throw during construction instead of failing after a partial Redis write. Use adapter `.clear(request)` when invalidating custom or varied response keys.
-
-## Preparing a release
-
-1. Review changes since the last tag and keep user-visible additions, fixes, dependency changes, and migration notes under Unreleased throughout development.
-2. Install using the configured pnpm version and `pnpm install --frozen-lockfile`. Dependency updates must honor `minimumReleaseAge: 10080` and peer compatibility. The version-specific exception for the explicitly requested clustered-LRU release is declared in workspace policy; keep other updates under the age floor. The policy governs this repository's resolution; consumers resolve package ranges under their own package-manager policy.
-3. Choose the next version based on compatibility impact, update `package.json`, and move the completed Unreleased notes into a new dated section. Retain all historical sections. Add an Unreleased section when development resumes. Update README examples, the feature guide, and these upgrade instructions together.
-4. Run `pnpm run quality`, exercise the full suite on supported Node versions, run `pnpm run test:compat`, and inspect `npm pack --dry-run`. The suite requires Docker for Redis/Testcontainers tests. Inspect that the archive includes the built entry points, Lua scripts, README, changelog, license, and linked documentation.
-5. Record verification against the actual release candidate. Coverage measures exercised code, not correctness; retain the concurrency, invalidation, HTTP, and stored-TTL regression checks.
-6. Commit the release candidate and create a matching `v<version>` tag when ready to publish. Pushing a matching tag triggers [the publishing workflow](../.github/workflows/publish.yml), which checks the package version, installs, runs quality/tests, inspects the package, and publishes with provenance. After npm publishing succeeds, a separate job creates a GitHub release for the existing tag with automatically generated release notes. Tags with a prerelease suffix are marked as GitHub prereleases. The workflow does not generate changelog entries.
-7. If GitHub release creation fails after npm publishing succeeds, rerun only the failed jobs so npm publishing is not repeated. The release job skips tags that already have a GitHub release.

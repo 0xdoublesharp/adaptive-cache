@@ -1,6 +1,34 @@
 # Changelog
 
-Notable changes by version. See [release history and process](docs/releases.md) for historical source revisions and upgrade instructions.
+Notable changes awaiting release and by version. See [releases and maintenance](docs/releases.md) for the release workflow and compatibility reference.
+
+## Unreleased
+
+### Added
+
+- `compression.maxDecodedBytes` sets the serialized payload ceiling for writes and decoded reads, defaulting to 64 MiB. Plain, marked, legacy, synchronous, and asynchronous codec paths share the limit.
+- `redis.maxTagCleanupKeys` limits aggregate key memberships processed by one tag invalidation, defaulting to 10000.
+- `bootstrapClusteredLru()` initializes cache IPC and atomic lease release in a Node cluster primary. Standalone use initializes automatically; L1 Redis continues to delegate leases to Redis.
+
+### Changed
+
+- Refresh eligible same-major development dependencies and transitive resolutions under the seven-day release-age policy: Node types 26.6.6, TypeScript ESLint parser/plugin 8.72.1, Vitest and its coverage provider 5.0.5, ESLint 10.14.0, Express 5.3.0, Prettier 3.9.10, and Testcontainers 12.2.1.
+- Align the package-manager pin and all CI workflows on pnpm 10.34.9. Retain TypeScript 6.0.3 for parser compatibility and tsup 8.5.1 within the supported major.
+- Remove the expired clustered-LRU release-age exception and apply scoped development-tool overrides for the glob cancellation and minimatch pattern-amplification advisories.
+
+### Fixed
+
+- Bound base64 allocation and gzip output before decoding oversized cache payloads.
+- Bound L1 invalidation message size, key counts, pending work, and delete batches. Chunk outgoing messages, report drain failures, and release shared per-prefix state when its last backend closes.
+- Apply the same tag validation to writes and invalidation: at most 1024 non-empty tags, 4096 UTF-8 bytes per tag, and 256 KiB for the encoded tag list. Deduplicate accepted tags and count overlapping cleanup memberships against the aggregate limit.
+- Include key bytes in clustered-LRU entry accounting, validate size settings, verify retained invalidation state and leases, and bound failed lock acquisition.
+- Compare clustered lease ownership, optionally record completion, and delete the lock in one synchronous primary operation so an old owner cannot remove a successor's lease. Bound worker IPC waits and clean up pending requests after errors or disconnects.
+- Pass loader cancellation signals through the Express and Fastify adapters, and keep adapter lock-expiration settings instance-local.
+- Exclude only scalar `refresh=true` from default HTTP cache identity. Keep other refresh values in the key and hash request paths larger than 1024 UTF-8 bytes.
+- Reject invalid lock lifetimes, remove lease values from logs, and require a live matching lease before recording refresh completion.
+- Scope coverage workflow permissions and Codecov credentials to the jobs and steps that use them, and bind the local Compose Redis port to loopback.
+
+Cluster primaries using clustered leases must call `bootstrapClusteredLru()` before forking workers. See [deployment compatibility](docs/releases.md#deployment-compatibility) for the current limits and rollout considerations.
 
 ## 0.3.0 - 2026-10-23
 
