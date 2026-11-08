@@ -21,9 +21,11 @@ describe('workflow and local-service security', () => {
     const workflow = read('.github/workflows/coverage.yml')
     const job = workflow.slice(workflow.indexOf('\n  doublcov:'), workflow.indexOf('\n  pages:'))
 
-    expect(job).not.toMatch(/runs-on:[\s\S]*?\n    env:\n      CODECOV_TOKEN:/)
+    expect(job).not.toMatch(/runs-on:[\s\S]*?\n {4}env:\n {6}CODECOV_TOKEN:/)
     expect(job).toContain("if: github.event_name != 'pull_request' && env.CODECOV_TOKEN != ''")
-    expect(job).toMatch(/- name: Upload Codecov report[\s\S]*?env:\n          CODECOV_TOKEN: \$\{\{ secrets\.CODECOV_TOKEN \}\}/)
+    expect(job).toMatch(
+      /- name: Upload Codecov report[\s\S]*?env:\n {10}CODECOV_TOKEN: \$\{\{ secrets\.CODECOV_TOKEN \}\}/,
+    )
   })
 
   it('publishes the local Redis port on loopback only', () => {

@@ -104,14 +104,14 @@ export class AdaptiveCache {
     validateNumber('compression.maxDecodedBytes', options.compression?.maxDecodedBytes, 0, false)
     if (
       options.compression?.maxDecodedBytes !== undefined &&
-      !Number.isSafeInteger(options.compression.maxDecodedBytes)
-    )
-      throw new RangeError('compression.maxDecodedBytes must be a positive safe integer')
-    if (
-      options.compression?.maxDecodedBytes !== undefined &&
       options.compression.maxDecodedBytes > bufferConstants.MAX_LENGTH
     )
       throw new RangeError(`compression.maxDecodedBytes must be at most ${bufferConstants.MAX_LENGTH}`)
+    if (
+      options.compression?.maxDecodedBytes !== undefined &&
+      !Number.isSafeInteger(options.compression.maxDecodedBytes)
+    )
+      throw new RangeError('compression.maxDecodedBytes must be a positive safe integer')
     validateNumber('redis.maxTagCleanupKeys', options.redis?.maxTagCleanupKeys, 0, false)
     if (options.redis?.maxTagCleanupKeys !== undefined && !Number.isSafeInteger(options.redis.maxTagCleanupKeys))
       throw new RangeError('redis.maxTagCleanupKeys must be a positive safe integer')

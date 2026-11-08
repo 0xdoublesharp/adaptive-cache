@@ -112,18 +112,20 @@ describe('core payload and typed APIs', () => {
     { compression: { minBytes: NaN } },
     { compression: { maxDecodedBytes: 0 } },
     { compression: { maxDecodedBytes: 1.5 } },
-    { compression: { maxDecodedBytes: bufferConstants.MAX_LENGTH + 1 } },
     { redis: { maxTagCleanupKeys: 0 } },
     { redis: { maxTagCleanupKeys: 1.5 } },
-  ])(
-    'rejects invalid options %o',
-    (options) => {
-      expect(() => create(options)).toThrow()
-    },
-  )
+  ])('rejects invalid options %o', (options) => {
+    expect(() => create(options)).toThrow()
+  })
 
   it('accepts valid resource ceilings', () => {
     expect(() => create({ compression: { maxDecodedBytes: 1024 }, redis: { maxTagCleanupKeys: 1 } })).not.toThrow()
+  })
+
+  it('reports the buffer ceiling before rejecting an oversized decoded-byte limit', () => {
+    expect(() => create({ compression: { maxDecodedBytes: bufferConstants.MAX_LENGTH + 1 } })).toThrow(
+      `compression.maxDecodedBytes must be at most ${bufferConstants.MAX_LENGTH}`,
+    )
   })
 
   it('rejects invalid tags consistently through public writes and invalidation', async () => {

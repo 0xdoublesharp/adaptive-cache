@@ -470,7 +470,7 @@ describe('L1RedisAdaptiveCacheBackend', () => {
     const flushing = backend.flush().then(() => {
       flushed = true
     })
-    await new Promise((resolve) => setImmediate(resolve))
+    await new Promise((resolve) => globalThis.setImmediate(resolve))
     expect(flushed).toBe(false)
     release()
     await flushing

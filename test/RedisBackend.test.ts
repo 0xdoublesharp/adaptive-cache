@@ -15,8 +15,10 @@ describe('RedisAdaptiveCacheBackend', () => {
   it('passes the configured cleanup limit through AdaptiveCache', async () => {
     const redis = new FakeRedis()
     const cache = new AdaptiveCache({ logLevel: 'silent', redis: { maxTagCleanupKeys: 1 } }, redis as any)
-    for (const key of ['one', 'two'])
-      await redis.zadd('adaptive:__adaptive:tag-index:red', Date.now() + 60_000, key)
+    redis.stores.sortedSets.set(
+      'adaptive:__adaptive:tag-index:red',
+      new Map(['one', 'two'].map((key) => [key, Date.now() + 60_000])),
+    )
 
     try {
       await expect(cache.invalidateTags(['red'])).rejects.toThrow('cleanup limit')
@@ -29,7 +31,7 @@ describe('RedisAdaptiveCacheBackend', () => {
     const redis = new FakeRedis()
     const backend = new (RedisAdaptiveCacheBackend as any)(redis, logger(), false, 2) as RedisAdaptiveCacheBackend
     const index = 'adaptive:__adaptive:tag-index:red'
-    for (const key of ['one', 'two', 'three']) await redis.zadd(index, Date.now() + 60_000, key)
+    redis.stores.sortedSets.set(index, new Map(['one', 'two', 'three'].map((key) => [key, Date.now() + 60_000])))
 
     await expect(backend.invalidateTags(['red'], 'adaptive:')).rejects.toThrow('cleanup limit')
   })
@@ -39,7 +41,7 @@ describe('RedisAdaptiveCacheBackend', () => {
     const backend = new RedisAdaptiveCacheBackend(redis as any, logger(), false, 3)
     for (const tag of ['red', 'blue']) {
       const index = `adaptive:__adaptive:tag-index:${tag}`
-      for (const key of ['one', 'two']) await redis.zadd(index, Date.now() + 60_000, key)
+      redis.stores.sortedSets.set(index, new Map(['one', 'two'].map((key) => [key, Date.now() + 60_000])))
     }
 
     await expect(backend.invalidateTags(['red', 'blue'], 'adaptive:')).rejects.toThrow('cleanup limit')
@@ -51,7 +53,10 @@ describe('RedisAdaptiveCacheBackend', () => {
     const backend = new RedisAdaptiveCacheBackend(redis as any, logger())
 
     await expect(
-      backend.invalidateTags(Array.from({ length: 1025 }, () => 'tag'), 'adaptive:'),
+      backend.invalidateTags(
+        Array.from({ length: 1025 }, () => 'tag'),
+        'adaptive:',
+      ),
     ).rejects.toThrow('at most 1024')
     expect(invalidate).not.toHaveBeenCalled()
   })

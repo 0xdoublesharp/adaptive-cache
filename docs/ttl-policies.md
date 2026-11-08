@@ -1,6 +1,6 @@
 # TTL policies
 
-Version 0.1.0 supports three TTL policies. Set `ttlPolicy` when constructing a cache or an Express/Fastify adapter. The default is the existing adaptive policy; selecting a new policy is opt-in.
+Choose from three TTL policies when constructing a cache or an Express/Fastify adapter. The adaptive policy is the default; AIMD and EWMA are opt-in alternatives.
 
 ```typescript
 const cache = new AdaptiveCache({
@@ -14,7 +14,7 @@ Policies operate on successful writes, comparing content fingerprints. Reading a
 
 ## Default adaptive policy
 
-Omit `ttlPolicy` or select `{ type: 'adaptive' }` to keep existing behavior. Unchanged content grows according to `ttlScaling`, damped by the accumulated change count. Changed content resets to `initialTTL`. The [README](../README.md#default-adaptive-ttl-formula) gives the formula.
+Omit `ttlPolicy` or select `{ type: 'adaptive' }` for multiplicative growth. Unchanged content grows according to `ttlScaling`, damped by the accumulated change count. Changed content resets to `initialTTL`. The [README](../README.md#default-adaptive-ttl-formula) gives the formula.
 
 ## Additive increase, multiplicative decrease
 
@@ -77,14 +77,14 @@ Redis uses its server clock and computes updates atomically in Lua. Clustered LR
 
 This is a heuristic based on sampled changes, not a guarantee about the source's actual change probability. Several source updates can occur between observations, including a change and reversal that leave the same fingerprint. A change observed after a long quiet interval can still increase the suggested TTL. For example, with the settings above, an initial observation followed by an unchanged observation after 300 seconds and a changed observation another 300 seconds later produces TTLs of `10`, `20`, and `25` seconds.
 
-EWMA uses neither `ttlScaling` nor the lifetime change count to choose TTLs. Existing change-count metadata remains available for diagnostics.
+EWMA uses neither `ttlScaling` nor the lifetime change count to choose TTLs. Change-count metadata remains available for diagnostics.
 
-## State, backends, and compatibility
+## State and backends
 
 For AIMD and EWMA, learning state expires with `metaTTL`, so it can survive payload expiry. Clearing a key, invalidating its namespace, losing metadata, or changing policy configuration resets learning. Omitting a parameter and specifying its default explicitly are equivalent. Keep policy settings consistent across instances that write the same keys.
 
-Both new policies are supported by `redis`, `l1-redis`, and `clustered-lru`. In L1 Redis mode, Redis owns the policy state and authoritative TTL. Optimistic L1 writes retain the existing short initial lifetime until Redis reconciliation. An injected cache determines the policy used by an HTTP adapter.
+All three policies are supported by `redis`, `l1-redis`, and `clustered-lru`. In L1 Redis mode, Redis owns the policy state and authoritative TTL. Optimistic L1 writes retain a short initial lifetime until Redis reconciliation. An injected cache determines the policy used by an HTTP adapter.
 
-Custom backends must declare `supportsTtlPolicies: true` and implement the normalized `ttlPolicy` received in update inputs. The cache rejects AIMD/EWMA on backends without that capability, instead of silently falling back. Existing custom backends continue to accept the default adaptive policy.
+Custom backends must declare `supportsTtlPolicies: true` and implement the normalized `ttlPolicy` received in update inputs. The cache rejects AIMD/EWMA on backends without that capability, instead of silently falling back. The default adaptive policy does not require that capability flag.
 
 Policies do not change loader locks, write fencing, HTTP eligibility, eviction policy, or resource ownership. See [loading, freshness, and cache policy](cache-features.md) for those behaviors.

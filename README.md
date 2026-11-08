@@ -14,11 +14,11 @@ Redis is the default backend. Add a bounded LRU layer to keep hot payloads in me
 
 Use middleware for response caching and `getOrSet` for expensive work that needs concurrent request coalescing, stale refresh, or negative caching. Express loaders and direct `getOrSet` calls support background refresh. Fastify refreshes run in the foreground so response hooks can approve sharing and storage. The cache honors HTTP storage restrictions but does not generate `Cache-Control` headers.
 
-See the [feature guide](docs/cache-features.md) for detailed policies and the [upgrade guide](docs/releases.md) before changing an existing deployment.
+See the [feature guide](docs/cache-features.md) for loading, invalidation, and HTTP policy, or the [TTL policy reference](docs/ttl-policies.md) for tuning freshness.
 
 ## Installation
 
-Requires Node.js 22 or newer. Supports Express 4/5 and Fastify 4 or 5.12.6 and later in the 5.x series. When upgrading to 0.3.0, follow the [Fastify migration instructions](docs/releases.md#upgrading-to-030).
+Requires Node.js 22 or newer. Supports Express 4/5 and Fastify 4 or 5.12.6 and later in the 5.x series.
 
 Install the package:
 
@@ -105,7 +105,7 @@ Writes and invalidation accept at most 1024 tags. Each tag must be a non-empty s
 
 Default keys include lowercased request authority, including its port, plus path and normalized query. Include the original Host header when clearing. `.clear(request)` also reproduces custom keys and header variations on the same cache instance.
 
-For a default key, the legacy helper accepts authority as an optional fifth argument:
+For a default key on the process-wide cache, pass authority to `clearAdaptiveCache` as its fifth argument:
 
 ```typescript
 import { clearAdaptiveCache } from '@0xdoublesharp/adaptive-cache'
@@ -113,7 +113,7 @@ import { clearAdaptiveCache } from '@0xdoublesharp/adaptive-cache'
 await clearAdaptiveCache('/api/users/123', {}, 'adaptive:', {}, 'api.example:8080')
 ```
 
-Omitting authority clears the legacy key format. Use the adapter's `.clear(request)` for injected caches, custom keys, or `varyBy`. Each default adapter owns its cache; `getDefaultCache()` is a separate process-wide helper instance.
+Use the adapter's `.clear(request)` for injected caches, custom keys, or `varyBy`. Each default adapter owns its cache; `getDefaultCache()` is a separate process-wide helper instance. Omitting authority from the process-wide helper targets an authority-free key, rather than the default HTTP identity.
 
 ## Fastify
 
@@ -213,7 +213,7 @@ Each `getOrSet` caller has a 30000ms deadline by default. Configure `loadTimeout
 
 ### HTTP identity and response policy
 
-Range and If-Range requests bypass caching, and partial `206` responses are not stored. Authorization and Cookie requests bypass caching unless explicitly enabled with a key or variation that isolates the caller. Responses with `Cache-Control: private` or `no-store`, `Set-Cookie`, `Vary: *`, or undeclared `Vary` headers are excluded. Declare `varyBy: ['Accept-Encoding']` when compression middleware adds that response header.
+Range and If-Range requests bypass caching, and partial `206` responses are not stored. Request `Cache-Control: no-store` or `no-cache` bypasses reuse and storage. Authorization and Cookie requests bypass caching unless explicitly enabled with a key or variation that isolates the caller. Responses with `Cache-Control: private`, `no-store`, or `no-cache`, `Set-Cookie`, `Vary: *`, or undeclared `Vary` headers are excluded from storage and loader sharing. Declare `varyBy: ['Accept-Encoding']` when compression middleware adds that response header.
 
 ```typescript
 const products = adaptiveExpressCache({
@@ -254,15 +254,14 @@ const result = await shouldRefreshCache('report:last-update', 60)
 
 if (result[0] === 'UPDATE') {
   const lockValue = result[1]
-  try {
-    await rebuildReport()
-  } finally {
-    await releaseCacheRefreshLock('report:last-update', lockValue)
-  }
+  await rebuildReport()
+  await releaseCacheRefreshLock('report:last-update', lockValue)
 }
 ```
 
-`lockExpirationSeconds` defaults to `60`. You can set a process-wide default:
+Release records successful completion only while the lease still belongs to that caller. If the rebuild throws, let the lease expire; use `getOrSet` when you want the cache to manage loading and lock cleanup. Lease values should stay private to the owner.
+
+`lockExpirationSeconds` must be a positive finite number and defaults to `60`. Adapter and cache options are instance-local. You can set a process-wide fallback for instances without an explicit setting:
 
 ```typescript
 import { setDefaultLockExpirationSeconds } from '@0xdoublesharp/adaptive-cache'
@@ -324,8 +323,8 @@ app.get(
 
 Read path:
 
-1. Read Redis invalidation controls and the entry revision, then check clustered LRU.
-2. On a valid L1 hit, return the local payload. Validation Lua reads and decodes the Redis envelope to detect older writers, but does not transfer it to Node.
+1. Read Redis invalidation controls, then check clustered LRU.
+2. Validate the candidate's write token and entry revision against Redis and recheck its freshness. On success, return the local payload. Validation Lua reads and decodes the Redis envelope to detect unversioned writers, but does not transfer it to Node.
 3. On L1 miss, fetch from Redis Lua.
 4. On Redis hit, hydrate L1 with Redis remaining TTL and metadata.
 5. On Redis miss, continue to the handler.
@@ -344,12 +343,14 @@ Loader writes, middleware writes, and asynchronous compression wait for Redis to
 
 Invalidation:
 
-- Explicit clears drain pending writes on the shared Redis client, delete Redis data, drain active L1 hydrations, remove L1 entries, then publish an invalidation message.
+- Explicit clears drain pending writes for the shared Redis client and prefix, delete Redis data, drain active L1 hydrations, remove L1 entries, then publish an invalidation message.
 - Reads that overlap an invalidation cannot hydrate an older snapshot back into L1.
 - Tag invalidation removes matching L1 entries and Redis entries.
 - Every accepted Redis write changes the entry revision. Pub/Sub accelerates invalidation; L1 validation also detects writes without it.
 - Other server-local L1 caches subscribe to Redis invalidation messages and delete stale keys.
 - Namespace and write barriers prevent invalidated in-flight work from becoming a later cache hit.
+
+Invalidation messages are limited to 256 KiB and 1024 keys, with at most 4096 UTF-8 bytes per key. Subscribers queue at most 4096 distinct keys and delete in batches of 128. Oversized messages and excess queued work are dropped; Redis revision checks still protect reads. `flush()` waits for accepted invalidations, retries a failed batch once, and rejects if that retry fails.
 
 Refresh locks use Redis Lua for cross-host coordination.
 
@@ -406,15 +407,15 @@ This initializes both the peer's cache IPC and adaptive-cache's atomic release h
 
 Defaults:
 
-| Option                  | Default               | Description                                          |
-| ----------------------- | --------------------- | ---------------------------------------------------- |
-| `lru.maxSizeBytes`      | `64 * 1024 * 1024`    | Total LRU size budget.                               |
-| `lru.maxEntrySizeBytes` | 10% of `maxSizeBytes` | Entries larger than this are skipped for L1 storage. |
-| `lru.timeout`           | package default       | Clustered LRU operation timeout.                     |
-| `lru.failsafe`          | `'reject'`            | Clustered LRU failure behavior.                      |
-| `lru.namespace`         | `'adaptive-cache'`    | Shared cache namespace.                              |
+| Option                  | Default               | Description                          |
+| ----------------------- | --------------------- | ------------------------------------ |
+| `lru.maxSizeBytes`      | `64 * 1024 * 1024`    | Total LRU size budget.               |
+| `lru.maxEntrySizeBytes` | 10% of `maxSizeBytes` | Maximum accounted size of one entry. |
+| `lru.timeout`           | `100` ms              | Clustered LRU operation timeout.     |
+| `lru.failsafe`          | `'reject'`            | Clustered LRU failure behavior.      |
+| `lru.namespace`         | `'adaptive-cache'`    | Shared cache namespace.              |
 
-Entry size is estimated as encoded payload bytes plus tag metadata and a small fixed metadata overhead. TTLs passed to clustered LRU are milliseconds; adaptive cache options use seconds.
+Entry size includes the UTF-8 key, encoded payload, tags, epoch metadata, and fixed metadata overhead. The size limits must be positive safe integers, and `maxEntrySizeBytes` cannot exceed `maxSizeBytes`. Oversized payloads are skipped; a standalone clustered-LRU oversized replacement also removes its adaptive metadata. Invalidation and lock operations fail explicitly when their control state cannot be retained. TTLs passed to clustered LRU are milliseconds; adaptive cache options use seconds.
 
 ## Per-worker L1 caching
 
@@ -436,49 +437,49 @@ adaptiveExpressCache({
         get: true,
         has: true,
         fetch: true,
-        memoize: true,
       },
     },
   },
 })
 ```
 
-Use `localL1: true` for the dependency's default local-cache settings.
+Local L1 is experimental in the supported peer. Supply an options object with `experimental: true`; omit the object or set `localL1: false` to disable it. Keep memory limits appropriate for the number of workers, since each worker owns its local cache.
 
 ## Configuration
 
-| Option                  | Type                                                               | Default       | Description                                                                           |
-| ----------------------- | ------------------------------------------------------------------ | ------------- | ------------------------------------------------------------------------------------- |
-| `initialTTL`            | `number`                                                           | `5`           | Starting cache duration in seconds.                                                   |
-| `maxTTL`                | `number \| (data) => number \| undefined`                          | `900`         | Maximum data TTL in seconds. Middleware can resolve it from response data.            |
-| `ttlScaling`            | `number`                                                           | `2`           | Factor used to grow TTL when content is unchanged. Growth is damped by `changeCount`. |
-| `redisPrefix`           | `string`                                                           | `'adaptive:'` | Prefix for Redis keys and invalidation channels.                                      |
-| `keyPrefix`             | `string`                                                           | unset         | Clearer alias for `redisPrefix`; applies to Redis and non-Redis backends.             |
-| `includeHeaders`        | `boolean`                                                          | `true`        | Add `X-Cache` and `X-Cache-TTL`.                                                      |
-| `includeDebugHeaders`   | `boolean`                                                          | `false`       | Add adaptive metadata headers.                                                        |
-| `forceRefresh`          | `boolean`                                                          | `false`       | Bypass existing cache reads and refresh after the handler response.                   |
-| `lockExpirationSeconds` | `number`                                                           | `60`          | Refresh lock expiration in seconds.                                                   |
-| `metaTTL`               | `number`                                                           | `604800`      | Metadata/tag TTL in positive integer seconds.                                         |
-| `compress`              | `boolean`                                                          | `true`        | Gzip payloads and store them as base64.                                               |
-| `logLevel`              | `'debug' \| 'info' \| 'warn' \| 'error' \| 'silent'`               | `'info'`      | Logger verbosity.                                                                     |
-| `backend`               | `'redis' \| 'l1-redis' \| 'clustered-lru' \| AdaptiveCacheBackend` | `'redis'`     | Cache backend.                                                                        |
-| `lru`                   | `AdaptiveCacheLruOptions`                                          | unset         | LRU options for `l1-redis` and `clustered-lru`.                                       |
-| `l1Redis.writeMode`     | `'async' \| 'await-redis'`                                         | `'async'`     | Whether `l1-redis` returns after L1 write or waits for Redis reconciliation.          |
-| `redis.maxTagCleanupKeys` | `number`                                                         | `10000`       | Maximum key memberships processed by one Redis tag invalidation.                      |
-| `ignoreQueryParams`     | `string[]`                                                         | `['refresh']` | Explicitly named parameters to exclude. By default, only scalar `refresh=true` is excluded. |
+| Option                    | Type                                                               | Default       | Description                                                                                                |
+| ------------------------- | ------------------------------------------------------------------ | ------------- | ---------------------------------------------------------------------------------------------------------- |
+| `initialTTL`              | `number`                                                           | `5`           | Starting cache duration in seconds.                                                                        |
+| `maxTTL`                  | `number \| (data) => number \| undefined`                          | `900`         | Maximum data TTL in seconds. Middleware can resolve it from response data.                                 |
+| `ttlScaling`              | `number`                                                           | `2`           | Factor used to grow TTL when content is unchanged. Growth is damped by `changeCount`.                      |
+| `redisPrefix`             | `string`                                                           | `'adaptive:'` | Prefix for Redis keys and invalidation channels.                                                           |
+| `keyPrefix`               | `string`                                                           | unset         | Clearer alias for `redisPrefix`; applies to Redis and non-Redis backends.                                  |
+| `includeHeaders`          | `boolean`                                                          | `true`        | Add `X-Cache` and `X-Cache-TTL`.                                                                           |
+| `includeDebugHeaders`     | `boolean`                                                          | `false`       | Add adaptive metadata headers.                                                                             |
+| `forceRefresh`            | `boolean`                                                          | `false`       | Bypass cache reuse and refresh from the loader or handler.                                                 |
+| `lockExpirationSeconds`   | `number`                                                           | `60`          | Refresh lock expiration in seconds.                                                                        |
+| `metaTTL`                 | `number`                                                           | `604800`      | Metadata retention in positive integer seconds.                                                            |
+| `compress`                | `boolean`                                                          | `true`        | Gzip payloads and store them as base64.                                                                    |
+| `logLevel`                | `'debug' \| 'info' \| 'warn' \| 'error' \| 'silent'`               | `'info'`      | Logger verbosity.                                                                                          |
+| `backend`                 | `'redis' \| 'l1-redis' \| 'clustered-lru' \| AdaptiveCacheBackend` | `'redis'`     | Cache backend.                                                                                             |
+| `lru`                     | `AdaptiveCacheLruOptions`                                          | unset         | LRU options for `l1-redis` and `clustered-lru`.                                                            |
+| `l1Redis.writeMode`       | `'async' \| 'await-redis'`                                         | `'async'`     | Whether `l1-redis` returns after L1 write or waits for Redis reconciliation.                               |
+| `redis.maxTagCleanupKeys` | `number`                                                           | `10000`       | Maximum key memberships processed by one Redis tag invalidation.                                           |
+| `ignoreQueryParams`       | `string[]`                                                         | unset         | Omitted: exclude only scalar `refresh=true`. An explicit list excludes every named parameter at any value. |
 
 Additional options shared by the cache and adapters:
 
-| Option                         | Default | Purpose                                                                                        |
-| ------------------------------ | ------- | ---------------------------------------------------------------------------------------------- |
-| `staleWhileRevalidate`         | `0`     | Seconds after freshness expiry during which a loader can refresh in the background.            |
-| `staleIfError`                 | `0`     | Independent seconds after freshness expiry during which a failed loader may return stale data. |
-| `negativeTTL`                  | `0`     | Opt-in TTL for null/undefined loader results or normal-handler HTTP 404 responses.             |
-| `lockWaitTimeoutMs`            | `5000`  | Maximum loader lock wait in milliseconds.                                                      |
-| `ttlJitter`                    | `0`     | Fraction from 0 to 1 by which to randomly shorten freshness.                                   |
-| `fingerprint` / `ignoreFields` | unset   | Custom content fingerprint or dotted fields excluded from the hash.                            |
-| `compression`                  | unset   | Selective codec settings, including the 64 MiB default `maxDecodedBytes` payload ceiling.       |
-| `onEvent`                      | unset   | Observer for cache activity; also available through `cache.onEvent()`.                         |
+| Option                         | Default    | Purpose                                                                                         |
+| ------------------------------ | ---------- | ----------------------------------------------------------------------------------------------- |
+| `staleWhileRevalidate`         | `0`        | Seconds after freshness expiry during which a loader can refresh in the background.             |
+| `staleIfError`                 | `0`        | Independent seconds after freshness expiry during which a failed loader may return stale data.  |
+| `negativeTTL`                  | `0`        | Opt-in TTL for null/undefined loader results or normal-handler HTTP 404 responses.              |
+| `lockWaitTimeoutMs`            | `5000`     | Maximum loader lock wait in milliseconds.                                                       |
+| `ttlJitter`                    | `0`        | Fraction from 0 to 1 by which to randomly shorten freshness.                                    |
+| `fingerprint` / `ignoreFields` | unset      | Custom content fingerprint or dotted fields excluded from the hash.                             |
+| `compression`                  | unset      | Selective codec settings, including the 64 MiB default `maxDecodedBytes` payload ceiling.       |
+| `compression.maxDecodedBytes`  | `67108864` | Maximum serialized bytes accepted by writes and decoded reads, including uncompressed payloads. |
+| `onEvent`                      | unset      | Observer for cache activity; also available through `cache.onEvent()`.                          |
 
 `loadTimeoutMs` defaults to `30000` milliseconds and `closeTimeoutMs` to `5000` milliseconds. Deadline options accept values from `0` through `2147483647`; per-call options override instance defaults.
 
@@ -488,16 +489,16 @@ The default HTTP identity treats only scalar `?refresh=true` as a control parame
 
 ## Headers
 
-| Header                  | Meaning                                                                |
-| ----------------------- | ---------------------------------------------------------------------- |
-| `X-Cache: HIT`          | Cached response returned.                                              |
-| `X-Cache: MISS`         | No cache entry; handler ran.                                           |
-| `X-Cache: BYPASS`       | Cache read skipped because `forceRefresh` or `?refresh=true` was used. |
-| `X-Cache: RETRY`        | Cache read/decode failed; handler ran without failing the request.     |
-| `X-Cache-TTL`           | Remaining data TTL in seconds.                                         |
-| `X-Cache-Data-TTL`      | Debug: adaptive TTL assigned to the data version.                      |
-| `X-Cache-Last-Modified` | Debug: Unix timestamp when content last changed, or `unknown`.         |
-| `X-Cache-Refreshed`     | Debug: content change count.                                           |
+| Header                  | Meaning                                                                          |
+| ----------------------- | -------------------------------------------------------------------------------- |
+| `X-Cache: HIT`          | Cached response returned.                                                        |
+| `X-Cache: MISS`         | No cache entry; handler ran.                                                     |
+| `X-Cache: BYPASS`       | Cache reuse skipped by request policy, an explicit refresh, or a closed adapter. |
+| `X-Cache: RETRY`        | Cache read/decode failed; handler ran without failing the request.               |
+| `X-Cache-TTL`           | Remaining data TTL in seconds.                                                   |
+| `X-Cache-Data-TTL`      | Debug: adaptive TTL assigned to the data version.                                |
+| `X-Cache-Last-Modified` | Debug: Unix timestamp when content last changed, or `unknown`.                   |
+| `X-Cache-Refreshed`     | Debug: content change count.                                                     |
 
 ## Redis keys and Lua metadata
 
@@ -526,7 +527,7 @@ Lua update returns:
 ['CACHED', dataTTL, lastChanged, changeCount, hash, changedFlag]
 ```
 
-The public hit reports `staleAge` in seconds. A rejected write returns `['INVALIDATED', 0]`. Treat the Redis envelope and Lua results as internal formats. Follow the [upgrade guide](docs/releases.md) when changing readers or writers.
+The public hit reports `staleAge` in seconds. A rejected write returns `['INVALIDATED', 0]`. Treat the Redis envelope and Lua results as internal formats; application code should use the typed public API.
 
 ## TTL policies
 
@@ -613,7 +614,7 @@ Custom backends can implement `captureWriteToken`, `invalidateNamespace`, and `o
 
 ## Development
 
-Use the package manager pinned in [package.json](package.json). Dependency updates must follow the release-age policy in [pnpm-workspace.yaml](pnpm-workspace.yaml) and satisfy peer ranges. After updating, inspect the lockfile and run the quality gate.
+Use the package manager pinned in [package.json](package.json), install the locked dependencies, and run the quality gate. Dependency maintenance follows the release-age policy in [pnpm-workspace.yaml](pnpm-workspace.yaml) and the supported peer ranges.
 
 Code is organized by responsibility. `AdaptiveCache.ts` owns the API and lifecycle, `CacheLoader.ts` coordinates loads and locks, and `payload.ts` handles fingerprints and codecs. HTTP adapters and backends have their own modules. Keep changes with the code that owns the behavior, and preserve regression tests when moving it.
 
