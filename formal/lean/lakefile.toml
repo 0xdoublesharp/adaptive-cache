@@ -1,0 +1,6 @@
+name = "adaptive_cache_formal"
+version = "0.1.0"
+defaultTargets = ["AdaptiveCache"]
+
+[[lean_lib]]
+name = "AdaptiveCache"

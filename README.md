@@ -520,7 +520,7 @@ Given an adaptive key, this package uses:
 Lua fetch returns:
 
 ```text
-[data, remainingTTL, dataTTL, lastChanged, changeCount, hash, staleFlag, staleAgeMs, revision]
+[data, remainingTTL, dataTTL, lastChanged, changeCount, hash, staleFlag, staleAgeMs, revision, remainingMs]
 ```
 
 Lua update returns:
@@ -639,6 +639,8 @@ FUZZ_RUNS=1000 FUZZ_SEED=20261021 pnpm run test:fuzz
 ```
 
 Each property defaults to 100 generated cases. Failures report a seed, shrink path, and minimal counterexample. To replay one, set `FUZZ_SEED` and `FUZZ_PATH` to the reported values and select that property with `pnpm run test:fuzz -t 'property name'`. Keep confirmed failures as regression tests.
+
+Machine-checked formal specifications and proofs live under [formal/](formal/README.md). Run `pnpm run verify:tla` to model-check write fencing, L1+Redis revision coherence, tag cleanup, coalesced loader/lock coordination (with liveness), Fastify coalesced publication, and L1+Redis drain/flush lifecycle in TLA+ (TLC), `pnpm run verify:trace` to check live Redis+Lua+L1 execution traces against `AdaptiveCacheFencing.tla` in TLC, `pnpm run verify:lean` to check the unbounded Lean 4 proofs for TTL policies, HTTP cacheability & key-framing injectivity, barrier/epoch/lock algebra, and payload/Lua Taylor bounds, or `pnpm run verify:formal` to run the TLA+ and Lean 4 suites together.
 
 `pnpm run bench:lru` measures primary-process and real worker-process clustered LRU operations, with and without local L1. It also checks retained worker invalidation and delivered IPC requests under backpressure. See the [clustered-LRU evaluation](docs/lru-cache-clustered-2.1.1.md) for a historical comparison and measurement method.
 

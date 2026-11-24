@@ -2,6 +2,28 @@
 
 Notable changes by version. See [releases and maintenance](docs/releases.md) for the release workflow and compatibility reference.
 
+## Unreleased
+
+### Added
+
+- Export `AdaptiveCacheMetadata`, `AdaptiveCacheLruLocalL1Options`, `HttpPolicyOptions`, `HttpRequestLike`, `HttpResponseLike`, `ExpressRequestLike`, `ExpressResponseLike`, `FastifyRequestLike`, and `FastifyReplyLike` from the package entry point.
+- Allow batched reads to return stale entries with `getMany(keys, { allowStale: true })`.
+- Add TLA+ specifications with liveness checks, trace conformance against live Redis and its L1 cache, and Lean 4 proofs. Run `verify:tla` for the specifications, `verify:trace` for runtime conformance, `verify:lean` for the proofs, or `verify:formal` for both the specifications and proofs. See the [formal verification guide](formal/README.md).
+
+### Fixed
+
+- Let `l1-redis` `clear()` and `invalidateTags()` proceed when an unrelated local L1 subscriber drain fails.
+- Use the remaining freshness in milliseconds from Redis Lua to hydrate `l1-redis`, including entries with a sub-second lifetime remaining and entries configured with `initialTTL` of one second or less.
+- Give cached Express handler 404 responses a zero stale window (`staleTTL: 0`).
+- Include cache metadata headers on Express and Fastify loader-mode hits, matching handler-mode hits.
+- Apply `ignoreFields` and custom `fingerprint` callbacks to HTTP response bodies inside the cache envelope. Exclude Express-generated ETags from the fingerprint when ignored fields are removed from the body used for hashing.
+- Bypass the local L1 for namespace generation and tag epoch checks on scalar clustered-LRU reads. Treat missing invalidation state as a cache miss when the entry depends on it.
+- Retry the clustered-LRU lock handler readiness check on the next acquisition after a transient IPC failure.
+- Handle `undefined` query values when generating keys with `getAdaptiveCacheKey()`.
+- Recognize `Cache-Control` directives with whitespace before `=`.
+- Validate `refreshThreshold` before acquiring a refresh lock.
+- Decode only a bounded base64 prefix when checking cached HTTP binary responses for compression.
+
 ## 0.4.1 - 2026-11-08
 
 ### Changed

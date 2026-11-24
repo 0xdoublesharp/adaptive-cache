@@ -1,0 +1,79 @@
+name: Formal Verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags:
+      - '!*'
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tla:
+    name: TLA+ model checking (TLC)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: 10.34.9
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: pnpm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download TLA+ tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/tla"
+          curl -fsSL -o "$RUNNER_TEMP/tla/tla2tools.jar" \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+
+      - name: Run TLC model checker
+        env:
+          TLA2TOOLS_JAR: ${{ runner.temp }}/tla/tla2tools.jar
+        run: node scripts/verify-tla.mjs
+
+      - name: Run Redis + L1 runtime trace conformance
+        env:
+          TLA2TOOLS_JAR: ${{ runner.temp }}/tla/tla2tools.jar
+          REQUIRE_TLA_TRACE: '1'
+        run: pnpm run verify:trace
+
+  lean:
+    name: Lean 4 proofs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+
+      - name: Install elan
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+            | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Build and verify Lean 4 proofs
+        run: node scripts/verify-lean.mjs

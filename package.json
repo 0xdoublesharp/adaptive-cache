@@ -63,7 +63,11 @@
     "test:types": "tsc --ignoreConfig --noEmit --strict --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck test/types/consumer.ts",
     "bench:lru": "node --expose-gc scripts/benchmark-lru-upgrade.mjs",
     "test:packed": "node scripts/packed-package-smoke.mjs",
-    "test:compat": "node scripts/packed-package-smoke.mjs all"
+    "test:compat": "node scripts/packed-package-smoke.mjs all",
+    "verify:tla": "node scripts/verify-tla.mjs",
+    "verify:trace": "REQUIRE_TLA_TRACE=1 vitest run test/TlaTraceConformance.test.ts",
+    "verify:lean": "node scripts/verify-lean.mjs",
+    "verify:formal": "pnpm run verify:tla && pnpm run verify:lean"
   },
   "dependencies": {
     "debug": "^4.4.3",
