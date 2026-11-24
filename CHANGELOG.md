@@ -11,8 +11,14 @@ Notable changes by version. See [releases and maintenance](docs/releases.md) for
 - Support opt-in `policyHeaders` on Express and Fastify adapters so read-side `shouldCache` checks can inspect declared non-replayable headers without persisting arbitrary headers or leaking them on the wire.
 - Add TLA+ specifications with liveness checks, trace conformance against live Redis and its L1 cache, and Lean 4 proofs (including total HTTP cache-key framing injectivity). Run `verify:tla` for the specifications, `verify:trace` for runtime conformance, `verify:lean` for the proofs, or `verify:formal` for both the specifications and proofs. See the [formal verification guide](formal/README.md).
 
+### Changed
+
+- Update `@0xdoublesharp/lru-cache-clustered` to `2.1.5` (with an exact-version release-age exception) and require optional peer version `^2.1.5` for LRU-backed modes.
+- Refresh eligible same-major development dependencies and security overrides under the seven-day release-age policy (`fastify` 5.12.8, `supertest` 7.3.2, `@typescript-eslint/eslint-plugin` and `@typescript-eslint/parser` 8.73.0, `vitest` and `@vitest/coverage-v8` 5.1.0, `eslint` 10.15.0, `prettier` 3.10.1, `vite` 8.3.8, `glob` 14.0.6, and `minimatch` 11.0.9).
+
 ### Fixed
 
+- Round clustered-LRU write TTLs up to positive integer milliseconds (`Math.max(1, Math.ceil(ms))`), matching `@0xdoublesharp/lru-cache-clustered` 2.1.4+ integer-TTL validation.
 - Let `l1-redis` `clear()` and `invalidateTags()` proceed when an unrelated local L1 subscriber drain fails.
 - Use the remaining freshness in milliseconds from Redis Lua to hydrate `l1-redis`, including entries with a sub-second lifetime remaining and entries configured with `initialTTL` of one second or less.
 - Give cached Express handler 404 responses a zero stale window (`staleTTL: 0`).

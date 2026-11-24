@@ -32,6 +32,7 @@ import {
 
 const DEFAULT_LRU_MAX_SIZE_BYTES = 64 * 1024 * 1024
 const entrySize = (key: string, valueBytes: number) => Buffer.byteLength(key, 'utf8') + valueBytes
+const toLruTtlMs = (ms: number) => Math.max(1, Math.ceil(ms))
 
 const assertUserKeys = (prefix: string, ...keys: string[]) => {
   const reserved = prefix + '__adaptive:'
@@ -261,7 +262,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
       }
       const metadata = metadataFromEnvelope(envelope)
       await cache.set(input.metaKey, metadata, {
-        ttl: input.metaTTL * 1000,
+        ttl: toLruTtlMs(input.metaTTL * 1000),
         size: entrySize(input.metaKey, Buffer.byteLength(JSON.stringify(metadata)) + METADATA_SIZE_OVERHEAD_BYTES),
         updateL1: true,
       })
@@ -342,7 +343,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
       if (!Object.keys(next).length) await cache.delete(tagKey)
       else
         await cache.set(tagKey, next, {
-          ttl: Math.max(1, await cache.getRemainingTTL(tagKey)),
+          ttl: toLruTtlMs(await cache.getRemainingTTL(tagKey)),
           size: entrySize(tagKey, Buffer.byteLength(JSON.stringify(next)) + METADATA_SIZE_OVERHEAD_BYTES),
           updateL1: true,
         })
@@ -404,7 +405,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
         if (!Object.keys(next).length) await cache.delete(tagKey)
         else
           await cache.set(tagKey, next, {
-            ttl: Math.max(1, await cache.getRemainingTTL(tagKey)),
+            ttl: toLruTtlMs(await cache.getRemainingTTL(tagKey)),
             size: entrySize(tagKey, Buffer.byteLength(JSON.stringify(next)) + METADATA_SIZE_OVERHEAD_BYTES),
             updateL1: true,
           })
@@ -458,7 +459,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
 
       for (let attempt = 0; attempt < 3; attempt++) {
         const acquired = await cache.setIfAbsent(lockKey, lockValue, {
-          ttl: lockExpirationSeconds * 1000,
+          ttl: toLruTtlMs(lockExpirationSeconds * 1000),
           size: entrySize(lockKey, Buffer.byteLength(lockValue)),
         })
         const existingLock = (await cache.get(lockKey, { bypassL1: true })) as string | undefined
@@ -469,7 +470,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
       throw new Error('Clustered LRU cannot retain refresh lock')
     } else {
       const stored = await cache.set(lockKey, lockValue, {
-        ttl: lockExpirationSeconds * 1000,
+        ttl: toLruTtlMs(lockExpirationSeconds * 1000),
         size: entrySize(lockKey, Buffer.byteLength(lockValue)),
         updateL1: true,
       })
@@ -591,7 +592,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
 
     const cache = await this.getCache()
     const stored = await cache.set(dataKey, envelope, {
-      ttl: Math.max(1, envelope.expiresAt - Date.now()),
+      ttl: toLruTtlMs(envelope.expiresAt - Date.now()),
       size,
       updateL1: true,
     })
@@ -614,7 +615,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
           return
         }
         await cache.set(tagKey, next, {
-          ttl: Math.max(1, Object.values(next).reduce((maximum, expiry) => Math.max(maximum, expiry), 0) - Date.now()),
+          ttl: toLruTtlMs(Object.values(next).reduce((maximum, expiry) => Math.max(maximum, expiry), 0) - Date.now()),
           size,
           updateL1: true,
         })
