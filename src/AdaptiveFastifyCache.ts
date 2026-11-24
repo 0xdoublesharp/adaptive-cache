@@ -9,6 +9,7 @@ import {
   encodeHttpResponse,
   decodeHttpResponse,
   cloneHttpBody,
+  cachedPolicyResponse,
   CachedHttpHeaders,
   HttpResponseTransport,
   watchHttpResponse,
@@ -90,22 +91,23 @@ const setHitHeaders = (reply: FastifyReplyLike, includeHeaders: boolean, hit: Ad
   }
 }
 
-const cachedResponseView = (response: ReturnType<typeof decodeHttpResponse>): HttpResponseLike => ({
-  statusCode: response.statusCode || 200,
-  getHeader: (name) => response.headers?.[name.toLowerCase()],
-})
-
 // The final status/headers determine storage policy, while each request must
 // enter Fastify's serialization and send hooks with the original representation.
-const finalizeResponse = (candidate: ReturnType<typeof encodeHttpResponse>, reply: HttpResponseLike) => ({
-  ...encodeHttpResponse(
-    decodeHttpResponse(candidate).body,
-    reply.statusCode,
-    reply.getHeader?.('content-type'),
-    reply.getHeaders?.(),
-  ),
-  fastifyReplay: { statusCode: candidate.statusCode, headers: candidate.headers },
-})
+const finalizeResponse = (
+  candidate: ReturnType<typeof encodeHttpResponse>,
+  reply: HttpResponseLike,
+  policyHeaders: string[] | undefined,
+) =>
+  Object.assign(
+    encodeHttpResponse(
+      decodeHttpResponse(candidate).body,
+      reply.statusCode,
+      reply.getHeader?.('content-type'),
+      reply.getHeaders?.(),
+      policyHeaders,
+    ),
+    { fastifyReplay: { statusCode: candidate.statusCode, headers: candidate.headers } },
+  )
 
 const replayResponse = (data: any) => ({
   ...decodeHttpResponse(data),
@@ -256,7 +258,7 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
             : await wait(() => cacheInstance.get(adaptiveCacheKey, { allowStale: true }))
           if (existing) {
             const cached = decodeHttpResponse(existing.data)
-            if (!responseCacheable(req, cachedResponseView(cached))) {
+            if (!responseCacheable(req, cachedPolicyResponse(cached))) {
               await wait(() => cacheInstance.clear(adaptiveCacheKey))
             } else if (!existing.stale) {
               if (!allowsReplay()) return serveBypass()
@@ -288,7 +290,8 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
             loadTimeoutMs: remaining(),
             signal,
             shouldStore: (data: unknown) =>
-              data !== UNSHAREABLE_HTTP_RESULT && responseCacheable(req, cachedResponseView(decodeHttpResponse(data))),
+              data !== UNSHAREABLE_HTTP_RESULT &&
+              responseCacheable(req, cachedPolicyResponse(decodeHttpResponse(data))),
           }
           const value = await wait(() => {
             if (!allowsReplay()) return Promise.resolve(UNSHAREABLE_HTTP_RESULT)
@@ -310,6 +313,7 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
                     loaderResponse.statusCode,
                     loaderResponse.getHeader('content-type'),
                     loaderResponse.headers,
+                    options.policyHeaders,
                   )
                   sendStarted.add(req)
                   try {
@@ -320,7 +324,7 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
                   }
                   const finalReply = await transport!.completion
                   return finalReply && !bypassed.has(req) && responseCacheable(req, finalReply)
-                    ? finalizeResponse(candidate, finalReply)
+                    ? finalizeResponse(candidate, finalReply, options.policyHeaders)
                     : UNSHAREABLE_HTTP_RESULT
                 },
                 loadOptions,
@@ -331,7 +335,7 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
           if (!allowsReplay()) return serveBypass()
           if (value === UNSHAREABLE_HTTP_RESULT) return reply.send(await wait(loadOnce))
           const response = decodeHttpResponse(value)
-          if (!responseCacheable(req, cachedResponseView(response))) {
+          if (!responseCacheable(req, cachedPolicyResponse(response))) {
             await wait(() => cacheInstance.clear(adaptiveCacheKey))
             return reply.send(await wait(loadOnce))
           }
@@ -345,7 +349,7 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
         if (!allowsReplay()) return serveBypass()
         if (result && !overrideCache) {
           const response = decodeHttpResponse(result.data)
-          if (responseCacheable(req, cachedResponseView(response))) {
+          if (responseCacheable(req, cachedPolicyResponse(response))) {
             const replay = replayResponse(result.data)
             setHitHeaders(reply, includeHeaders, result)
             if (replay.statusCode) reply.statusCode = replay.statusCode
@@ -416,6 +420,7 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
                 reply.statusCode,
                 reply.getHeader?.('content-type'),
                 reply.getHeaders?.(),
+                options.policyHeaders,
               )
               candidates.set(req, candidate)
               body = cloneHttpBody(decodeHttpResponse(candidate).body)
@@ -439,7 +444,7 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
       const adaptiveCacheKey = cacheKeys.get(req)
       if (!adaptiveCacheKey || !responseCacheable(req, reply)) return
 
-      const response = finalizeResponse(candidate, reply)
+      const response = finalizeResponse(candidate, reply, options.policyHeaders)
       const update = async () => {
         const payload = decodeHttpResponse(candidate).body
         let body = payload

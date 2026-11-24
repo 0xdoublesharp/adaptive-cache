@@ -1,4 +1,5 @@
 import Fastify from 'fastify'
+import { createHash } from 'node:crypto'
 import { EventEmitter, once } from 'node:events'
 import { createServer, get as httpGet } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -12,7 +13,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { adaptiveFastifyCache } from '../src/AdaptiveFastifyCache'
 import { adaptiveExpressCache } from '../src/AdaptiveExpressCache'
 import { createHttpLoader } from '../src/httpLoader'
-import { buildHttpCacheKey } from '../src/httpPolicy'
+import { buildHttpCacheKey, type HttpResponseLike } from '../src/httpPolicy'
 import { encodeHttpResponse } from '../src/httpResponse'
 import { getAdaptiveCacheKey } from '../src/utils'
 import { gate } from './helpers/coreCache'
@@ -127,6 +128,89 @@ const restrictionCases = [
 
 for (const framework of ['express', 'fastify'] as const) {
   for (const mode of ['handler', 'loader'] as const) {
+    it.each([true, false])(
+      `${framework} ${mode} keeps custom headers off replay with policy opt-in %s`,
+      async (optIn) => {
+        const { cache, backend } = controlledCache()
+        const source = vi.fn(async () => 'origin')
+        const options = {
+          cache,
+          ...(mode === 'loader' ? { loader: source } : {}),
+          ...(optIn
+            ? {
+                policyHeaders: ['X-Policy-Marker'],
+                shouldCache: (_req: unknown, res?: HttpResponseLike) =>
+                  !res || res.getHeader?.('x-policy-marker') === 'yes',
+              }
+            : {}),
+        }
+        let get: (first: boolean) => Promise<{ body: string; headers: Record<string, unknown> }>
+        let close = async () => {}
+        let flush: () => Promise<void>
+        if (framework === 'express') {
+          const app = express()
+          const adapter = adaptiveExpressCache(options)
+          app.get(
+            '/data',
+            (req, res, next) => {
+              if (mode === 'loader' && req.headers['x-origin']) res.set('X-Policy-Marker', 'yes')
+              next()
+            },
+            adapter,
+            async (_req, res) => res.set('X-Policy-Marker', 'yes').send(await source()),
+          )
+          get = async (first) => {
+            const response = await request(app)
+              .get('/data')
+              .set('Host', 'localhost:80')
+              .set('x-origin', first ? 'yes' : '')
+            return { body: response.text, headers: response.headers }
+          }
+          flush = adapter.flush
+        } else {
+          const app = Fastify()
+          const adapter = adaptiveFastifyCache(options)
+          await app.register(adapter)
+          app.get(
+            '/data',
+            {
+              preHandler: async (req, reply) => {
+                if (mode === 'loader' && req.headers['x-origin']) reply.header('X-Policy-Marker', 'yes')
+              },
+            },
+            (_req, reply) => {
+              reply.header('X-Policy-Marker', 'yes')
+              return source()
+            },
+          )
+          get = async (first) => {
+            const response = await app.inject({ url: '/data', headers: { 'x-origin': first ? 'yes' : '' } })
+            return { body: response.payload, headers: response.headers }
+          }
+          flush = adapter.flush
+          close = () => app.close()
+        }
+        try {
+          expect(await get(true)).toMatchObject({ body: 'origin', headers: { 'x-policy-marker': 'yes' } })
+          await flush()
+          const hit = await get(false)
+          expect(hit).toMatchObject({ body: 'origin', headers: { 'x-cache': 'HIT' } })
+          expect(hit.headers).not.toHaveProperty('x-policy-marker')
+          expect(source).toHaveBeenCalledTimes(1)
+          expect(backend.updatedKeys).toHaveLength(1)
+          const entry = await cache.get<{ headers: Record<string, unknown>; policyHeaders?: Record<string, unknown> }>(
+            backend.updatedKeys[0],
+          )
+          expect(entry?.data.headers).not.toHaveProperty('x-policy-marker')
+          if (optIn) expect(entry?.data.policyHeaders).toEqual({ 'x-policy-marker': 'yes' })
+          else expect(entry?.data).not.toHaveProperty('policyHeaders')
+        } finally {
+          await close()
+          await cache.close()
+        }
+      },
+    )
+
     it.each(restrictionCases)(`${framework} ${mode} preserves an already-set %s: %s`, async (name, value) => {
       const { cache, backend } = controlledCache()
       const go = vi.spyOn(cache, 'getOrSet')
@@ -489,12 +573,23 @@ describe('function-valued varyBy', () => {
       new Uint8Array([2]),
     ]
     const keys = variants.map(key)
-    expect(keys.every((value) => value?.match(/^adaptive:.*vary:[0-9a-f]{64}:$/))).toBe(true)
+    expect(keys.every((value) => value?.match(/^adaptive:.*vary:[0-9a-f]{64}:v$/))).toBe(true)
     expect(new Set(keys).size).toBe(variants.length)
     expect(key([date])).toBe(key([new Date(date)]))
     expect(key({ z: [true, undefined, null, Buffer.from('x')], 2: 17, 10: 'ten' })).toBe(
       key(Object.assign(Object.create(null), { 10: 'ten', 2: 17, z: [true, null, null, 'eA=='], omitted: undefined })),
     )
+  })
+
+  it('separates a varied key from a literal unvaried path that embeds the query digest and vary delimiter', () => {
+    const common = { req: { headers: { host: 'example.test' } }, cachePrefix: 'shared:' }
+    const query = { filter: 'open' }
+    const queryDigest = createHash('sha256').update(JSON.stringify(query)).digest('hex')
+    const variation = { filter: 'closed' }
+    const varied = buildHttpCacheKey({ ...common, requestPath: '/data', query, varyBy: () => variation })
+    const unvaried = buildHttpCacheKey({ ...common, requestPath: `/data:${queryDigest}:vary`, query: variation })
+    expect(varied).toBe(`${unvaried}v`)
+    expect(varied).not.toBe(unvaried)
   })
 
   it('bypasses unsupported values even inside a supported container', () => {

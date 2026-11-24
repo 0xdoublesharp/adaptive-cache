@@ -91,6 +91,8 @@ export const isCacheableHttpBody = (body: unknown): boolean => {
 export type HttpPolicyOptions<Req extends HttpRequestLike = HttpRequestLike> = {
   key?: (req: Req) => string
   varyBy?: string[] | ((req: Req) => unknown)
+  /** Additional response headers available to shouldCache on cache hits. */
+  policyHeaders?: string[]
   shouldCache?: (req: Req, response?: HttpResponseLike) => boolean
   cacheAuthenticated?: boolean
   cacheCookies?: boolean
@@ -164,8 +166,10 @@ export const getRequestHeader = (req: HttpRequestLike, name: string, rawHeaders?
 export const getResponseHeader = (response: HttpResponseLike, name: string): unknown =>
   response.getHeader?.(normalizeHeaderName(name))
 
-export const getDeclaredVaryHeaders = (varyBy: unknown) =>
-  Array.isArray(varyBy) ? [...new Set(varyBy.map(normalizeHeaderName).filter(Boolean))].sort() : []
+export const getDeclaredHeaderNames = (names: unknown) =>
+  Array.isArray(names) ? [...new Set(names.map(normalizeHeaderName).filter(Boolean))].sort() : []
+
+export const getDeclaredVaryHeaders = getDeclaredHeaderNames
 
 const hasCallerOwnedIsolation = <Req extends HttpRequestLike>(
   options: HttpPolicyOptions<Req>,
@@ -271,14 +275,14 @@ export const buildHttpCacheKey = <Req extends HttpRequestLike>(input: {
 
   if (!input.varyBy) return base
   if (Array.isArray(input.varyBy))
-    return `${base}vary:${digest(getDeclaredVaryHeaders(input.varyBy).map((name) => [name, header(name)]))}:`
+    return `${base}vary:${digest(getDeclaredVaryHeaders(input.varyBy).map((name) => [name, header(name)]))}:v`
   const variation = input.varyBy(input.req)
   try {
     const hash = crypto
       .createHash('sha256')
       .update(serializeVariation(variation) ?? 'undefined')
       .digest('hex')
-    return `${base}vary:${hash}:`
+    return `${base}vary:${hash}:v`
   } catch {
     return undefined
   }

@@ -188,17 +188,18 @@ theorem bounded_negative_ttl_caps_both (n maxTTL : Nat) (hPos : 0 < n) :
   exact ⟨min n maxTTL, rfl, Nat.min_le_left _ _, Nat.min_le_right _ _⟩
 
 -------------------------------------------------------------------------------
--- Key Framing Injectivity (src/utils.ts:61-83 & src/httpPolicy.ts:206-233)
+-- Total Key Framing Injectivity (src/utils.ts:62-84 & src/httpPolicy.ts:250-285)
 --
--- Default HTTP keys have the framed structure:
---   Unvaried: prefix ++ "authority:" ++ authHash ++ ":" ++ pathKey ++ ":" ++ queryHash ++ ":"
---   Varied:   prefix ++ "authority:" ++ authHash ++ ":" ++ pathKey ++ ":" ++ queryHash ++ ":vary:" ++ varyHash ++ ":"
--- where authHash, queryHash, and varyHash are fixed-length 64-char SHA-256 hex digests.
--- For a fixed suffix shape (all keys unvaried, or all keys varied under one adapter/prefix),
--- fixed-length framing from left and right makes the mapping injective even if `pathKey`
--- contains arbitrary `:` or `"vary:"` substrings (modulo SHA-256 collisions).
--- Note: mixing varied and unvaried adapters under the same `keyPrefix` is outside this
--- fixed-suffix theorem; distinct adapters with different `varyBy` shapes should use distinct prefixes.
+-- HTTP cache keys have four mutually disjoint framed shapes:
+--   1. Default unvaried: prefix ++ "authority:" ++ authHash ++ ":" ++ pathKey ++ ":" ++ queryHash ++ ":"
+--   2. Default varied:   prefix ++ "authority:" ++ authHash ++ ":" ++ pathKey ++ ":" ++ queryHash ++ ":vary:" ++ varyHash ++ ":v"
+--   3. Custom unvaried:  prefix ++ "/custom/" ++ customHash ++ ":" ++ queryHash ++ ":"
+--   4. Custom varied:    prefix ++ "/custom/" ++ customHash ++ ":" ++ queryHash ++ ":vary:" ++ varyHash ++ ":v"
+--
+-- Unvaried keys terminate with `':'`, while varied keys terminate with `'v'`, so varied and
+-- unvaried adapters can share a prefix without ever colliding. Likewise, default keys begin
+-- after `prefix` with `'a'` (`"authority:"`) while custom keys begin with `'/'` (`"/custom/"`),
+-- so default and custom keys are also mutually disjoint.
 -------------------------------------------------------------------------------
 
 /-- List-level framing helper: concatenating a fixed-length left frame, arbitrary middle payload,
@@ -247,8 +248,8 @@ theorem http_key_components_unique
     exact List.append_inj_right' h1 (hQueryLen.1.trans hQueryLen.2.symm)
   exact ⟨hAuth, hPath, hQuery⟩
 
-/-- Varied HTTP cache key framing (`varyBy` configured) with fixed-length SHA-256 authority,
-    query, and variation digests is injective in `(authDigest, pathKey, queryDigest, varyDigest)`. -/
+/-- Varied HTTP cache key framing (`varyBy` configured, terminated by `:v`) with fixed-length
+    SHA-256 authority, query, and variation digests is injective in all four components. -/
 theorem http_varied_key_components_unique
     (prefixChars auth1 auth2 path1 path2 query1 query2 vary1 vary2 : List Char)
     (hAuthLen : auth1.length = 64 ∧ auth2.length = 64)
@@ -256,17 +257,17 @@ theorem http_varied_key_components_unique
     (hVaryLen : vary1.length = 64 ∧ vary2.length = 64)
     (hEq :
       (prefixChars ++ "authority:".toList ++ auth1 ++ [':']) ++ path1 ++
-        ([':'] ++ query1 ++ ":vary:".toList ++ vary1 ++ [':']) =
+        ([':'] ++ query1 ++ ":vary:".toList ++ vary1 ++ [':', 'v']) =
       (prefixChars ++ "authority:".toList ++ auth2 ++ [':']) ++ path2 ++
-        ([':'] ++ query2 ++ ":vary:".toList ++ vary2 ++ [':'])) :
+        ([':'] ++ query2 ++ ":vary:".toList ++ vary2 ++ [':', 'v'])) :
     auth1 = auth2 ∧ path1 = path2 ∧ query1 = query2 ∧ vary1 = vary2 := by
   have hLenL :
       (prefixChars ++ "authority:".toList ++ auth1 ++ [':']).length =
       (prefixChars ++ "authority:".toList ++ auth2 ++ [':']).length := by
     simp [hAuthLen.1, hAuthLen.2]
   have hLenR :
-      ([':'] ++ query1 ++ ":vary:".toList ++ vary1 ++ [':']).length =
-      ([':'] ++ query2 ++ ":vary:".toList ++ vary2 ++ [':']).length := by
+      ([':'] ++ query1 ++ ":vary:".toList ++ vary1 ++ [':', 'v']).length =
+      ([':'] ++ query2 ++ ":vary:".toList ++ vary2 ++ [':', 'v']).length := by
     simp [hQueryLen.1, hQueryLen.2, hVaryLen.1, hVaryLen.2]
   have ⟨hL, hPath, hR⟩ := framed_key_injective _ _ _ _ _ _ hLenL hLenR hEq
   have hAuth : auth1 = auth2 := by
@@ -283,5 +284,155 @@ theorem http_varied_key_components_unique
   have hQuery : query1 = query2 :=
     List.append_inj_right' hR3 (hQueryLen.1.trans hQueryLen.2.symm)
   exact ⟨hAuth, hPath, hQuery, hVary⟩
+
+/-- An unvaried HTTP key (ending in `':'`) can NEVER collide with a varied HTTP key (ending in `'v'`),
+    even when both share the same prefix and arbitrary path strings contain `":vary:"`. -/
+theorem http_unvaried_ne_varied (u v : List Char) :
+    u ++ [':'] ≠ v ++ [':', 'v'] := by
+  intro hEq
+  have hTail : u ++ [':'] = (v ++ [':']) ++ ['v'] := by
+    simpa [List.append_assoc] using hEq
+  have hLast := congrArg List.getLast? hTail
+  simp at hLast
+
+/-- A default HTTP key (`prefix ++ "authority:" ++ ...`) can NEVER collide with a custom HTTP key
+    (`prefix ++ "/custom/" ++ ...`) sharing the same prefix. -/
+theorem http_default_ne_custom (prefixChars r1 r2 : List Char) :
+    prefixChars ++ "authority:".toList ++ r1 ≠ prefixChars ++ "/custom/".toList ++ r2 := by
+  intro hEq
+  rw [List.append_assoc, List.append_assoc] at hEq
+  have hRight := List.append_inj_right hEq rfl
+  have hHead := congrArg List.head? hRight
+  simp at hHead
+
+/-- Unified HTTP key identity across all 4 `(default/custom) × (unvaried/varied)` key shapes. -/
+inductive HttpKeySpec where
+  | defaultKey (auth path query : List Char) (vary : Option (List Char))
+  | customKey (customHash query : List Char) (vary : Option (List Char))
+  deriving DecidableEq
+
+def encodeHttpKey (prefixChars : List Char) : HttpKeySpec → List Char
+  | .defaultKey auth path query none =>
+      (prefixChars ++ "authority:".toList ++ auth ++ [':']) ++ path ++ ([':'] ++ query ++ [':'])
+  | .defaultKey auth path query (some vary) =>
+      (prefixChars ++ "authority:".toList ++ auth ++ [':']) ++ path ++
+        ([':'] ++ query ++ ":vary:".toList ++ vary ++ [':', 'v'])
+  | .customKey customHash query none =>
+      prefixChars ++ "/custom/".toList ++ customHash ++ [':'] ++ query ++ [':']
+  | .customKey customHash query (some vary) =>
+      prefixChars ++ "/custom/".toList ++ customHash ++ [':'] ++ query ++ ":vary:".toList ++ vary ++ [':', 'v']
+
+def validHttpKeySpec : HttpKeySpec → Prop
+  | .defaultKey auth _ query none => auth.length = 64 ∧ query.length = 64
+  | .defaultKey auth _ query (some vary) => auth.length = 64 ∧ query.length = 64 ∧ vary.length = 64
+  | .customKey customHash query none => customHash.length = 64 ∧ query.length = 64
+  | .customKey customHash query (some vary) => customHash.length = 64 ∧ query.length = 64 ∧ vary.length = 64
+
+/-- Total HTTP key injectivity: two valid HTTP keys under the same prefix are equal if and only if
+    they have the exact same variant (default vs custom, unvaried vs varied) and identical components. -/
+theorem http_key_total_injective (prefixChars : List Char) (k1 k2 : HttpKeySpec)
+    (h1 : validHttpKeySpec k1) (h2 : validHttpKeySpec k2)
+    (hEq : encodeHttpKey prefixChars k1 = encodeHttpKey prefixChars k2) :
+    k1 = k2 := by
+  cases k1 with
+  | defaultKey a1 p1 q1 v1 =>
+    cases k2 with
+    | customKey c2 q2 v2 =>
+      cases v1 <;> cases v2 <;> simp only [encodeHttpKey] at hEq
+      all_goals
+        have hNe := http_default_ne_custom prefixChars
+        simp only [List.append_assoc] at hEq hNe
+        exact absurd hEq (hNe _ _)
+    | defaultKey a2 p2 q2 v2 =>
+      cases v1 with
+      | none =>
+        cases v2 with
+        | none =>
+          simp only [encodeHttpKey] at hEq
+          have ⟨ha, hp, hq⟩ := http_key_components_unique prefixChars a1 a2 p1 p2 q1 q2 ⟨h1.1, h2.1⟩ ⟨h1.2, h2.2⟩ hEq
+          subst ha; subst hp; subst hq; rfl
+        | some w2 =>
+          simp only [encodeHttpKey] at hEq
+          exfalso
+          have hNe := http_unvaried_ne_varied
+            ((prefixChars ++ "authority:".toList ++ a1 ++ [':']) ++ p1 ++ ([':'] ++ q1))
+            ((prefixChars ++ "authority:".toList ++ a2 ++ [':']) ++ p2 ++ ([':'] ++ q2 ++ ":vary:".toList ++ w2))
+          simp only [List.append_assoc] at hEq hNe
+          exact hNe hEq
+      | some w1 =>
+        cases v2 with
+        | none =>
+          simp only [encodeHttpKey] at hEq
+          exfalso
+          have hNe := http_unvaried_ne_varied
+            ((prefixChars ++ "authority:".toList ++ a2 ++ [':']) ++ p2 ++ ([':'] ++ q2))
+            ((prefixChars ++ "authority:".toList ++ a1 ++ [':']) ++ p1 ++ ([':'] ++ q1 ++ ":vary:".toList ++ w1))
+          simp only [List.append_assoc] at hEq hNe
+          exact hNe hEq.symm
+        | some w2 =>
+          simp only [encodeHttpKey] at hEq
+          have ⟨ha, hp, hq, hw⟩ := http_varied_key_components_unique prefixChars a1 a2 p1 p2 q1 q2 w1 w2
+            ⟨h1.1, h2.1⟩ ⟨h1.2.1, h2.2.1⟩ ⟨h1.2.2, h2.2.2⟩ hEq
+          subst ha; subst hp; subst hq; subst hw; rfl
+  | customKey c1 q1 v1 =>
+    cases k2 with
+    | defaultKey a2 p2 q2 v2 =>
+      cases v1 <;> cases v2 <;> simp only [encodeHttpKey] at hEq
+      all_goals
+        have hNe := http_default_ne_custom prefixChars
+        simp only [List.append_assoc] at hEq hNe
+        exact absurd hEq.symm (hNe _ _)
+    | customKey c2 q2 v2 =>
+      cases v1 with
+      | none =>
+        cases v2 with
+        | none =>
+          simp only [encodeHttpKey] at hEq
+          have hRest : c1 ++ [':'] ++ q1 ++ [':'] = c2 ++ [':'] ++ q2 ++ [':'] := by
+            have hL : (prefixChars ++ "/custom/".toList) ++ (c1 ++ [':'] ++ q1 ++ [':']) =
+                      (prefixChars ++ "/custom/".toList) ++ (c2 ++ [':'] ++ q2 ++ [':']) := by
+              simpa [List.append_assoc] using hEq
+            exact List.append_inj_right hL rfl
+          have hNoEnd : c1 ++ [':'] ++ q1 = c2 ++ [':'] ++ q2 := List.append_inj_left' hRest rfl
+          have hq : q1 = q2 := List.append_inj_right' hNoEnd (h1.2.trans h2.2.symm)
+          have hc1 : c1 ++ [':'] = c2 ++ [':'] := List.append_inj_left' hNoEnd (h1.2.trans h2.2.symm)
+          have hc : c1 = c2 := List.append_inj_left' hc1 rfl
+          subst hc; subst hq; rfl
+        | some w2 =>
+          simp only [encodeHttpKey] at hEq
+          exfalso
+          have hNe := http_unvaried_ne_varied
+            (prefixChars ++ "/custom/".toList ++ c1 ++ [':'] ++ q1)
+            (prefixChars ++ "/custom/".toList ++ c2 ++ [':'] ++ q2 ++ ":vary:".toList ++ w2)
+          simp only [List.append_assoc] at hEq hNe
+          exact hNe hEq
+      | some w1 =>
+        cases v2 with
+        | none =>
+          simp only [encodeHttpKey] at hEq
+          exfalso
+          have hNe := http_unvaried_ne_varied
+            (prefixChars ++ "/custom/".toList ++ c2 ++ [':'] ++ q2)
+            (prefixChars ++ "/custom/".toList ++ c1 ++ [':'] ++ q1 ++ ":vary:".toList ++ w1)
+          simp only [List.append_assoc] at hEq hNe
+          exact hNe hEq.symm
+        | some w2 =>
+          simp only [encodeHttpKey] at hEq
+          have hRest : c1 ++ [':'] ++ q1 ++ ":vary:".toList ++ w1 ++ [':', 'v'] =
+                       c2 ++ [':'] ++ q2 ++ ":vary:".toList ++ w2 ++ [':', 'v'] := by
+            have hL : (prefixChars ++ "/custom/".toList) ++ (c1 ++ [':'] ++ q1 ++ ":vary:".toList ++ w1 ++ [':', 'v']) =
+                      (prefixChars ++ "/custom/".toList) ++ (c2 ++ [':'] ++ q2 ++ ":vary:".toList ++ w2 ++ [':', 'v']) := by
+              simpa [List.append_assoc] using hEq
+            exact List.append_inj_right hL rfl
+          have h1' : c1 ++ [':'] ++ q1 ++ ":vary:".toList ++ w1 = c2 ++ [':'] ++ q2 ++ ":vary:".toList ++ w2 :=
+            List.append_inj_left' hRest rfl
+          have hw : w1 = w2 := List.append_inj_right' h1' (h1.2.2.trans h2.2.2.symm)
+          have h2' : c1 ++ [':'] ++ q1 ++ ":vary:".toList = c2 ++ [':'] ++ q2 ++ ":vary:".toList :=
+            List.append_inj_left' h1' (h1.2.2.trans h2.2.2.symm)
+          have h3' : c1 ++ [':'] ++ q1 = c2 ++ [':'] ++ q2 := List.append_inj_left' h2' rfl
+          have hq : q1 = q2 := List.append_inj_right' h3' (h1.2.1.trans h2.2.1.symm)
+          have h4' : c1 ++ [':'] = c2 ++ [':'] := List.append_inj_left' h3' (h1.2.1.trans h2.2.1.symm)
+          have hc : c1 = c2 := List.append_inj_left' h4' rfl
+          subst hc; subst hq; subst hw; rfl
 
 end AdaptiveCache.HttpPolicy

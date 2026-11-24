@@ -281,6 +281,8 @@ await shouldRefreshCache('report:last-update', 60, false, 120)
 
 ![Adaptive Cache architecture](docs/adaptive-cache-architecture.svg)
 
+![Adaptive Cache request, adaptive TTL, and fencing lifecycle](docs/adaptive-cache-request-flow.svg)
+
 ## Backend modes
 
 | Backend         | Redis required | Best for                                | Behavior                                                           |

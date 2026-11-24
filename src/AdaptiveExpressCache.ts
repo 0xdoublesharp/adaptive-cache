@@ -9,6 +9,7 @@ import {
   encodeHttpResponse,
   decodeHttpResponse,
   cloneHttpBody,
+  cachedPolicyResponse,
   CachedHttpHeaders,
   HttpResponseTransport,
   watchHttpResponse,
@@ -112,11 +113,6 @@ const setHitHeaders = (res: ExpressResponseLike, includeHeaders: boolean, hit: A
     res.set('X-Cache-Refreshed', hit.metadata.changeCount)
   }
 }
-
-const cachedResponseView = (response: ReturnType<typeof decodeHttpResponse>): HttpResponseLike => ({
-  statusCode: response.statusCode || 200,
-  getHeader: (name) => response.headers?.[name.toLowerCase()],
-})
 
 const responseHeaders = (res: ExpressResponseLike, contentEncoding: unknown) => {
   const headers = { ...res.getHeaders?.() }
@@ -250,7 +246,7 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
           : await wait(() => cacheInstance.get(adaptiveCacheKey, { allowStale: true }))
         if (existing) {
           const cached = decodeHttpResponse(existing.data)
-          if (!responseCacheable(req, cachedResponseView(cached))) {
+          if (!responseCacheable(req, cachedPolicyResponse(cached))) {
             await wait(() => cacheInstance.clear(adaptiveCacheKey))
           } else if (!existing.stale) {
             if (!allowsReplay()) return serveBypass()
@@ -283,7 +279,7 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
           shouldStore: (data: unknown) =>
             storeAllowed &&
             data !== UNSHAREABLE_HTTP_RESULT &&
-            responseCacheable(req, cachedResponseView(decodeHttpResponse(data))),
+            responseCacheable(req, cachedPolicyResponse(decodeHttpResponse(data))),
         }
         const value = await wait(() => {
           if (!allowsReplay()) return Promise.resolve(UNSHAREABLE_HTTP_RESULT)
@@ -309,6 +305,7 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
                     loaderResponse.statusCode,
                     loaderResponse.getHeader('content-type'),
                     loaderResponse.headers,
+                    options.policyHeaders,
                   )
                 }
                 const contentEncoding = res.getHeader?.('content-encoding')
@@ -326,6 +323,7 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
                   res.statusCode,
                   res.getHeader?.('content-type'),
                   responseHeaders(res, contentEncoding),
+                  options.policyHeaders,
                 )
               },
               loadOptions,
@@ -339,7 +337,7 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
         if (!allowsReplay()) return serveBypass()
         if (value === UNSHAREABLE_HTTP_RESULT) return res.send(await wait(loadOnce))
         const response = decodeHttpResponse(value)
-        if (!responseCacheable(req, cachedResponseView(response))) {
+        if (!responseCacheable(req, cachedPolicyResponse(response))) {
           await wait(() => cacheInstance.clear(adaptiveCacheKey))
           return res.send(await wait(loadOnce))
         }
@@ -354,7 +352,7 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
       if (result && !overrideCache) {
         try {
           const response = decodeHttpResponse(result.data)
-          if (responseCacheable(req, cachedResponseView(response))) {
+          if (responseCacheable(req, cachedPolicyResponse(response))) {
             setHitHeaders(res, includeHeaders, result)
             if (response.statusCode) res.statusCode = response.statusCode
             setCachedHeaders(res, response.headers)
@@ -375,15 +373,16 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
 
       const capture = (body: unknown, contentEncoding: unknown, expressEnd?: true) => {
         if (!isCacheableHttpBody(body) || !responseCacheable(req, res)) return
-        const response = {
-          ...encodeHttpResponse(
+        const response = Object.assign(
+          encodeHttpResponse(
             body,
             res.statusCode,
             res.getHeader?.('content-type'),
             responseHeaders(res, contentEncoding),
+            options.policyHeaders,
           ),
-          ...(expressEnd ? { expressEnd } : {}),
-        }
+          expressEnd ? { expressEnd } : {},
+        )
         const update = async () => {
           let currentMaxTTL = cacheInstance.resolveMaxTTL(cloneHttpBody(parseJsonBody(body)), {
             maxTTL: options.maxTTL,

@@ -12,6 +12,7 @@ import { ClusteredLruAdaptiveCacheBackend } from '../src/backends/ClusteredLruAd
 import { L1RedisAdaptiveCacheBackend } from '../src/backends/L1RedisAdaptiveCacheBackend'
 import { RedisAdaptiveCacheBackend } from '../src/backends/RedisAdaptiveCacheBackend'
 import { isResponseCacheable } from '../src/httpPolicy'
+import { encodeHttpResponse } from '../src/httpResponse'
 import { Logger } from '../src/lib/logger'
 import { getAdaptiveCacheKey } from '../src/utils'
 import { ControlledBackend, controlledCache } from './helpers/httpFixtures'
@@ -279,13 +280,7 @@ describe('module completeness and bug regressions', () => {
       res.on('end', () => cb(null, raw))
     }
     await request(expressApp).get('/no-ct').set('Host', 'localhost:80').expect(200)
-    await expressCache.set('no-ct-envelope', {
-      __adaptiveCacheHttpResponse: 1,
-      statusCode: 200,
-      headers: {},
-      isBuffer: false,
-      body: '{"a":1}',
-    })
+    await expressCache.set('no-ct-envelope', encodeHttpResponse('{"a":1}', 200, undefined, {}))
     await request(expressApp).get('/invalid-json').set('Host', 'localhost:80').buffer(true).parse(rawParser).expect(200)
     await request(expressApp).get('/text').set('Host', 'localhost:80').expect(200)
     await request(expressApp).get('/bool').set('Host', 'localhost:80').expect(200)
