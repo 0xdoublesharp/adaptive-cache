@@ -2,7 +2,9 @@
 
 Notable changes by version. See [releases and maintenance](docs/releases.md) for the release workflow and compatibility reference.
 
-## Unreleased
+## 0.5.0 - 2026-11-23
+
+This release hardens L1/Redis invalidation, loader deadlines and fencing, HTTP privacy and key framing, updates `@0xdoublesharp/lru-cache-clustered` to `2.1.5`, and adds TLA+ and Lean 4 formal verification. Review the [0.5.0 upgrade notes](docs/releases.md#upgrading-to-050) before deploying.
 
 ### Added
 
@@ -35,6 +37,10 @@ Notable changes by version. See [releases and maintenance](docs/releases.md) for
 - Normalize numeric Redis Lua replies for `ioredis` `{ stringNumbers: true }`, treat empty string (`''`) encoded Redis payloads as valid hits, make `invalidateTags([])` a true no-op, track Lua script digests per Redis client, handle `force` and non-numeric `lastUpdate` safely in `shouldRefreshCache.lua`, include all variable envelope fields in clustered-LRU entry byte limits, and prevent local-L1 subscriber leaks when preserving a shared clustered cache on `quit(true)`.
 - Snapshot raw Fastify request headers in `onRequest` before header schema validation, honor current response privacy restrictions on Express/Fastify hits and loader joins, validate Express foreground loader late headers, preserve synchronous Fastify `reply.send()` handler semantics, settle Fastify candidate publication from transport completion, reject non-plain `varyBy` callback values, terminate varied HTTP cache keys with `:v` so varied and unvaried adapters sharing a prefix cannot collide, bypass `If-Match`/`If-Unmodified-Since` preconditions, clone bodies passed to `maxTTL` callbacks, enforce strict monotonic HTTP loader deadlines, abort HTTP loader work on premature client disconnect, support implicit `HEAD` on loader-backed routes, and capture one-shot Express `res.end(body)` responses.
 - Strip `ignoreFields` and normalize JSON whitespace on string HTTP JSON bodies losslessly without rounding integers above `Number.MAX_SAFE_INTEGER`, and track HTTP response envelopes by provenance so plain user JSON containing `__adaptiveCacheHttpResponse` is never misclassified during fingerprinting.
+
+### Compatibility notes
+
+Varied HTTP cache keys (`varyBy` configured) now terminate with `:v` so varied and unvaried adapters sharing a prefix cannot collide; existing varied entries miss once and repopulate. LRU-backed modes require optional peer `@0xdoublesharp/lru-cache-clustered@^2.1.5`. Stricter validations now reject ill-formed Unicode tags, keys starting with `<prefix>__adaptive:`, out-of-range TTLs, and non-plain `varyBy` callback values, and bypass conditional `If-Match` / `If-Unmodified-Since` requests. See [upgrading to 0.5.0](docs/releases.md#upgrading-to-050).
 
 ## 0.4.1 - 2026-11-08
 

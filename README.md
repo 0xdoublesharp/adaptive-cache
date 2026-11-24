@@ -205,7 +205,7 @@ await cache.invalidateNamespace()
 await cache.close()
 ```
 
-`getMany()` uses batched payload and primary invalidation checks on clustered LRU. Results and events remain per key. Bulk operations are not transactions.
+`getMany(keys, { allowStale })` uses batched payload and primary invalidation checks on clustered LRU and supports optional stale reads. Results and events remain per key. Bulk operations are not transactions.
 
 Stale windows are measured independently from freshness expiry. Plain `get()` returns fresh entries only; `get(key, { allowStale: true })` exposes retained stale data. Negative entries have no stale window. See the [feature guide](docs/cache-features.md) for force-refresh behavior, events, fingerprints, bulk operations, and custom backend limits.
 
@@ -215,7 +215,7 @@ Each `getOrSet` caller has a 30000ms deadline by default. Configure `loadTimeout
 
 ### HTTP identity and response policy
 
-Range and If-Range requests bypass caching, and partial `206` responses are not stored. Request `Cache-Control: no-store` or `no-cache` bypasses reuse and storage. Authorization and Cookie requests bypass caching unless explicitly enabled with a key or variation that isolates the caller. Responses with `Cache-Control: private`, `no-store`, or `no-cache`, `Set-Cookie`, `Vary: *`, or undeclared `Vary` headers are excluded from storage and loader sharing. Declare `varyBy: ['Accept-Encoding']` when compression middleware adds that response header.
+Range, If-Range, `If-Match`, and `If-Unmodified-Since` requests bypass caching, and partial `206` responses are not stored. Request `Cache-Control: no-store` or `no-cache` bypasses reuse and storage. Authorization and Cookie requests bypass caching unless explicitly enabled with a key or variation that isolates the caller. Fastify snapshots raw incoming headers in `onRequest` before header schema validation. Responses with `Cache-Control: private`, `no-store`, or `no-cache`, `Set-Cookie`, `Vary: *`, or undeclared `Vary` headers are excluded from storage and loader sharing, and current-response privacy restrictions prevent public cache hits from overwriting them. Declare `varyBy: ['Accept-Encoding']` when compression middleware adds that response header, and declare `policyHeaders` if `shouldCache` inspects custom non-replayable headers on read.
 
 ```typescript
 const products = adaptiveExpressCache({
@@ -487,7 +487,7 @@ Additional options shared by the cache and adapters:
 
 `loadTimeoutMs` defaults to `30000` milliseconds and `closeTimeoutMs` to `5000` milliseconds. Deadline options accept values from `0` through `2147483647`; per-call options override instance defaults.
 
-HTTP-only options are `cache`, `loader`, `key`, `varyBy`, `shouldCache`, `cacheAuthenticated`, `cacheCookies`, and request-derived `tags`. Defaults bypass authenticated/cookie requests and use authority, path, and query keys. Custom keys must provide authority or tenant isolation. See the [feature guide](docs/cache-features.md) for examples and per-call overrides.
+HTTP-only options are `cache`, `loader`, `key`, `varyBy`, `policyHeaders`, `shouldCache`, `cacheAuthenticated`, `cacheCookies`, and request-derived `tags`. Defaults bypass authenticated/cookie requests and use authority, path, and query keys (with `:v`-terminated variation suffixes when `varyBy` is set). Custom keys must provide authority or tenant isolation. See the [feature guide](docs/cache-features.md) for examples and per-call overrides.
 
 The default HTTP identity treats only scalar `?refresh=true` as a control parameter. Other `refresh` values remain part of the key. Supplying `ignoreQueryParams` explicitly removes every named parameter, regardless of value. Request paths over 1024 UTF-8 bytes are represented by a SHA-256 digest so attacker-controlled paths cannot create unbounded LRU key accounting.
 
