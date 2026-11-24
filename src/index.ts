@@ -24,6 +24,7 @@ export {
 export type {
   AdaptiveCacheTtlPolicy,
   AdaptiveCacheTtlPolicyState,
+  AdaptiveCacheMetadata,
   AdaptiveCacheHit,
   AdaptiveCacheSetOptions,
   AdaptiveCacheLoadOptions,
@@ -38,12 +39,24 @@ export type {
   AdaptiveCacheBackendFetchInput,
   AdaptiveCacheBackendUpdateInput,
   AdaptiveCacheUpdateResult,
+  AdaptiveCacheLruLocalL1Options,
 } from './types'
 export { getDefaultCache, redis }
 export { bootstrapClusteredLru } from './backends/ClusteredLruAdaptiveCacheBackend'
 export { adaptiveExpressCache, clearAdaptiveCache, adaptiveFastifyCache, cache }
-export type { AdaptiveExpressCacheOptions, AdaptiveExpressCacheMiddleware } from './AdaptiveExpressCache'
-export type { AdaptiveFastifyCacheOptions, AdaptiveFastifyCachePlugin } from './AdaptiveFastifyCache'
+export type { HttpPolicyOptions, HttpRequestLike, HttpResponseLike } from './httpPolicy'
+export type {
+  AdaptiveExpressCacheOptions,
+  AdaptiveExpressCacheMiddleware,
+  ExpressRequestLike,
+  ExpressResponseLike,
+} from './AdaptiveExpressCache'
+export type {
+  AdaptiveFastifyCacheOptions,
+  AdaptiveFastifyCachePlugin,
+  FastifyRequestLike,
+  FastifyReplyLike,
+} from './AdaptiveFastifyCache'
 
 // Util to easily cache functions outside of the controller flow
 export const cacheResult = async (key: string, timeInSeconds: number, callback: () => Promise<any>) => {

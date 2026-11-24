@@ -67,7 +67,7 @@ const decodePayload = (raw: string): any => {
 const isCompressed = (value: any) => {
   const data =
     value?.__adaptiveCacheHttpResponse === 1 && value.isBuffer === true && typeof value.body === 'string'
-      ? Buffer.from(value.body, 'base64')
+      ? Buffer.from(value.body.slice(0, 16), 'base64')
       : value
   return (
     Buffer.isBuffer(data) &&
@@ -124,20 +124,74 @@ export async function decode(encoded: string, options: AdaptiveCacheOptions): Pr
   return decodePayload(enforcePayloadSize(raw, maxDecodedBytes))
 }
 
+const isJsonContentType = (value: unknown): boolean => {
+  if (typeof value !== 'string') return false
+  const mediaType = value.split(';', 1)[0].trim().toLowerCase()
+  return mediaType === 'application/json' || mediaType.endsWith('+json')
+}
+
+const parseJsonObject = (value: string) => {
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const stripIgnoredFields = (target: any, ignoreFields: string[]) => {
+  let stripped = false
+  for (const fieldPath of ignoreFields) {
+    const fields = fieldPath.split('.')
+    let cursor = target
+    for (const field of fields.slice(0, -1)) {
+      if (!cursor || typeof cursor !== 'object' || !Object.prototype.hasOwnProperty.call(cursor, field)) {
+        cursor = undefined
+        break
+      }
+      cursor = cursor[field]
+    }
+    const leaf = fields[fields.length - 1]
+    if (cursor && typeof cursor === 'object' && Object.prototype.hasOwnProperty.call(cursor, leaf)) {
+      delete cursor[leaf]
+      stripped = true
+    }
+  }
+  return stripped
+}
+
+export function fingerprintTarget(data: any): any {
+  if (data?.__adaptiveCacheHttpResponse !== 1) return data
+  if (data.isBuffer && typeof data.body === 'string') return Buffer.from(data.body, 'base64')
+  if (typeof data.body === 'string' && isJsonContentType(data.headers?.['content-type'])) {
+    return parseJsonObject(data.body) ?? data.body
+  }
+  return data.body
+}
+
 export function fingerprint(data: any, options: AdaptiveCacheOptions, raw: string): string {
   if (options.ignoreFields?.length && data && typeof data === 'object' && !Buffer.isBuffer(data)) {
     const input = decodePayload(raw)
-    for (const path of options.ignoreFields) {
-      const fields = path.split('.')
-      let cursor = input
-      for (const field of fields.slice(0, -1)) {
-        if (!cursor || typeof cursor !== 'object' || !Object.prototype.hasOwnProperty.call(cursor, field)) {
-          cursor = undefined
-          break
+    if (input?.__adaptiveCacheHttpResponse === 1) {
+      let jsonBody = false
+      if (!input.isBuffer) {
+        if (input.body && typeof input.body === 'object') {
+          jsonBody = true
+          stripIgnoredFields(input.body, options.ignoreFields)
+        } else if (typeof input.body === 'string' && isJsonContentType(input.headers?.['content-type'])) {
+          const parsed = parseJsonObject(input.body)
+          if (parsed) {
+            jsonBody = true
+            if (stripIgnoredFields(parsed, options.ignoreFields)) {
+              input.body = JSON.stringify(parsed)
+            }
+          }
         }
-        cursor = cursor[field]
       }
-      if (cursor && typeof cursor === 'object') delete cursor[fields[fields.length - 1]]
+      // Express auto-generates ETag from raw JSON bytes including optional or volatile ignored fields.
+      if (jsonBody && input.headers) delete input.headers.etag
+    } else {
+      stripIgnoredFields(input, options.ignoreFields)
     }
     return crypto.createHash('sha256').update(encodePayload(input)).digest('hex')
   }

@@ -132,8 +132,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   private assertGenerationFits(key: string) {
-    if (entrySize(key, 64) > this.maxEntrySizeBytes)
-      throw new Error('Clustered LRU cannot retain invalidation state')
+    if (entrySize(key, 64) > this.maxEntrySizeBytes) throw new Error('Clustered LRU cannot retain invalidation state')
   }
 
   private async setGeneration(key: string) {
@@ -186,11 +185,11 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
     if (!envelope || envelope.expiresAt <= Date.now()) return null
     if (
       envelope.namespaceGeneration &&
-      envelope.namespaceGeneration !== (await this.generation(input.redisPrefix + '__adaptive:namespace'))
+      envelope.namespaceGeneration !== (await cache.get(input.redisPrefix + '__adaptive:namespace', { bypassL1: true }))
     )
       return null
     for (const [key, epoch] of Object.entries(envelope.epochs || {})) {
-      if (epoch !== (await this.generation(key))) return null
+      if (epoch !== (await cache.get(key, { bypassL1: true }))) return null
     }
     return lruFetchResult(envelope, input)
   }
@@ -419,7 +418,10 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
           recordRefresh: false,
         },
         this.options.timeout ?? 100,
-      ))
+      ).catch((error) => {
+        this.lockHandlerReady = undefined
+        throw error
+      }))
     const lockKey = lastUpdateKey + '-lock'
 
     if (!force) {
@@ -564,10 +566,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
       tags.map(async (tag) => {
         const tagKey = this.tagKey(redisPrefix, tag)
         const next = { ...(await liveTagMembers(cache, tagKey)), [key]: expiresAt }
-        const size = entrySize(
-          tagKey,
-          Buffer.byteLength(JSON.stringify(next), 'utf8') + METADATA_SIZE_OVERHEAD_BYTES,
-        )
+        const size = entrySize(tagKey, Buffer.byteLength(JSON.stringify(next), 'utf8') + METADATA_SIZE_OVERHEAD_BYTES)
         // Oversized indexes may be evicted; epoch fencing still invalidates payloads.
         if (size > this.maxEntrySizeBytes) {
           await cache.delete(tagKey)

@@ -88,6 +88,12 @@ describe('AdaptiveCache Class & Utils', () => {
       expect(fetchTuple[3]).toBeDefined()
       expect(fetchTuple[4]).toBeDefined()
       expect(fetchTuple[5]).toEqual(expect.any(String))
+      expect(fetchTuple[6]).toBe(0)
+      expect(fetchTuple[7]).toBe(0)
+      expect(fetchTuple[8]).toEqual(expect.any(String))
+      expect(fetchTuple[9]).toEqual(expect.any(Number))
+      expect(fetchTuple[9] as number).toBeGreaterThan(0)
+      expect(fetchTuple[9] as number).toBeLessThanOrEqual(10_000)
 
       const updateTuple = await redisClient.adaptiveCacheUpdate(
         'lua-direct-keydata',

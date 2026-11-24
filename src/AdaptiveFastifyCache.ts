@@ -18,7 +18,7 @@ import {
   snapshotHttpResponse,
 } from './httpPolicy'
 import { AdaptiveCache } from './AdaptiveCache'
-import { AdaptiveCacheLoaderContext, AdaptiveCacheLoadOptions, AdaptiveCacheOptions } from './types'
+import { AdaptiveCacheHit, AdaptiveCacheLoaderContext, AdaptiveCacheLoadOptions, AdaptiveCacheOptions } from './types'
 
 export type FastifyRequestLike = {
   method?: string
@@ -61,6 +61,18 @@ export type AdaptiveFastifyCachePlugin<Req extends FastifyRequestLike = FastifyR
 
 const setCachedHeaders = (reply: FastifyReplyLike, headers?: CachedHttpHeaders) => {
   for (const [name, value] of Object.entries(headers || {})) reply.header(name, value)
+}
+
+const setHitHeaders = (reply: FastifyReplyLike, includeHeaders: boolean, hit: AdaptiveCacheHit<unknown>) => {
+  if (includeHeaders) {
+    reply.header('X-Cache', 'HIT')
+    reply.header('X-Cache-TTL', hit.ttl.toString())
+  }
+  if (hit.metadata) {
+    reply.header('X-Cache-Data-TTL', hit.metadata.dataTTL)
+    reply.header('X-Cache-Last-Modified', hit.metadata.lastChanged || 'unknown')
+    reply.header('X-Cache-Refreshed', hit.metadata.changeCount)
+  }
 }
 
 const cachedResponseView = (response: ReturnType<typeof decodeHttpResponse>): HttpResponseLike => ({
@@ -230,10 +242,7 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
               existing = null
             } else if (!existing.stale) {
               const response = replayResponse(existing.data)
-              if (includeHeaders) {
-                reply.header('X-Cache', 'HIT')
-                reply.header('X-Cache-TTL', existing.ttl.toString())
-              }
+              setHitHeaders(reply, includeHeaders, existing)
               if (response.statusCode) reply.statusCode = response.statusCode
               setCachedHeaders(reply, response.headers)
               return reply.send(response.body)
@@ -321,15 +330,7 @@ export const adaptiveFastifyCache = <Req extends FastifyRequestLike = FastifyReq
           const response = decodeHttpResponse(result.data)
           if (responseCacheable(req, cachedResponseView(response))) {
             const replay = replayResponse(result.data)
-            if (includeHeaders) {
-              reply.header('X-Cache', 'HIT')
-              reply.header('X-Cache-TTL', result.ttl.toString())
-            }
-            if (result.metadata) {
-              reply.header('X-Cache-Data-TTL', result.metadata.dataTTL)
-              reply.header('X-Cache-Last-Modified', result.metadata.lastChanged || 'unknown')
-              reply.header('X-Cache-Refreshed', result.metadata.changeCount)
-            }
+            setHitHeaders(reply, includeHeaders, result)
             if (replay.statusCode) reply.statusCode = replay.statusCode
             setCachedHeaders(reply, replay.headers)
             cacheHits.add(req)

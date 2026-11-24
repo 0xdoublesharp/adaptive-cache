@@ -610,4 +610,62 @@ describe('L1RedisAdaptiveCacheBackend', () => {
     expect((third as any).state).not.toBe(originalState)
     await third.quit()
   })
+
+  it('still invalidates Redis on clear and invalidateTags when an unrelated L1 subscriber drain is failing', async () => {
+    const redis = new FakeRedis()
+    const redisBackend = new RedisAdaptiveCacheBackend(redis as any, logger())
+    const lru = new ClusteredLruAdaptiveCacheBackend({ namespace: namespace('clear-during-drain-fail') }, logger())
+    const backend = new L1RedisAdaptiveCacheBackend(redisBackend, lru, 'adaptive:', logger(), 'await-redis')
+
+    const makeInput = (key: string, tags: string[]) => ({
+      key,
+      dataKey: key + 'data',
+      metaKey: key + 'meta',
+      redisPrefix: 'adaptive:',
+      encodedData: JSON.stringify({ key }),
+      responseHash: `hash-${key}`,
+      initialTTL: 60,
+      maxTTL: 60,
+      ttlScaling: 2,
+      metaTTL: 100,
+      tags,
+    })
+
+    await backend.update(makeInput('clear-target', []))
+    await backend.update(makeInput('tag-target', ['t1']))
+
+    const deleteKeys = lru.deleteKeys.bind(lru)
+    const spy = vi.spyOn(lru, 'deleteKeys').mockImplementation(async (keys) => {
+      if (keys.includes('stuck-external-key')) throw new Error('unrelated L1 drain failure')
+      return deleteKeys(keys)
+    })
+
+    ;(backend as any).handleInvalidation(JSON.stringify({ source: 'external', keys: ['stuck-external-key'] }))
+    await vi.waitFor(() => expect((backend as any).invalidationFailure).toBeDefined())
+
+    await backend.clear('clear-target', 'clear-targetdata', 'clear-targetmeta', 'adaptive:')
+    expect(
+      await redisBackend.fetch({
+        key: 'clear-target',
+        dataKey: 'clear-targetdata',
+        metaKey: 'clear-targetmeta',
+        redisPrefix: 'adaptive:',
+        includeDebugHeaders: false,
+      }),
+    ).toBeNull()
+
+    await backend.invalidateTags(['t1'], 'adaptive:')
+    expect(
+      await redisBackend.fetch({
+        key: 'tag-target',
+        dataKey: 'tag-targetdata',
+        metaKey: 'tag-targetmeta',
+        redisPrefix: 'adaptive:',
+        includeDebugHeaders: false,
+      }),
+    ).toBeNull()
+
+    spy.mockRestore()
+    await backend.quit(false, true)
+  })
 })

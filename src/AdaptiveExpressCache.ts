@@ -22,6 +22,7 @@ import { getDefaultCache } from './singleton'
 import { getAdaptiveCacheKey } from './utils'
 import {
   AdaptiveCacheBackend,
+  AdaptiveCacheHit,
   AdaptiveCacheLoaderContext,
   AdaptiveCacheLoadOptions,
   AdaptiveCacheOptions,
@@ -87,6 +88,18 @@ const borrowBackend = (backend: AdaptiveCacheBackend): AdaptiveCacheBackend =>
 
 const setCachedHeaders = (res: ExpressResponseLike, headers?: CachedHttpHeaders) => {
   for (const [name, value] of Object.entries(headers || {})) res.set(name, value)
+}
+
+const setHitHeaders = (res: ExpressResponseLike, includeHeaders: boolean, hit: AdaptiveCacheHit<unknown>) => {
+  if (includeHeaders) {
+    res.set('X-Cache', 'HIT')
+    res.set('X-Cache-TTL', hit.ttl.toString())
+  }
+  if (hit.metadata) {
+    res.set('X-Cache-Data-TTL', hit.metadata.dataTTL)
+    res.set('X-Cache-Last-Modified', hit.metadata.lastChanged || 'unknown')
+    res.set('X-Cache-Refreshed', hit.metadata.changeCount)
+  }
 }
 
 const cachedResponseView = (response: ReturnType<typeof decodeHttpResponse>): HttpResponseLike => ({
@@ -215,10 +228,7 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
             await wait(() => cacheInstance.clear(adaptiveCacheKey))
             existing = null
           } else if (!existing.stale) {
-            if (includeHeaders) {
-              res.set('X-Cache', 'HIT')
-              res.set('X-Cache-TTL', existing.ttl.toString())
-            }
+            setHitHeaders(res, includeHeaders, existing)
             if (cached.statusCode) res.statusCode = cached.statusCode
             setCachedHeaders(res, cached.headers)
             return res.send(cached.body)
@@ -284,15 +294,7 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
         try {
           const response = decodeHttpResponse(result.data)
           if (responseCacheable(req, cachedResponseView(response))) {
-            if (includeHeaders) {
-              res.set('X-Cache', 'HIT')
-              res.set('X-Cache-TTL', result.ttl.toString())
-            }
-            if (result.metadata) {
-              res.set('X-Cache-Data-TTL', result.metadata.dataTTL)
-              res.set('X-Cache-Last-Modified', result.metadata.lastChanged || 'unknown')
-              res.set('X-Cache-Refreshed', result.metadata.changeCount)
-            }
+            setHitHeaders(res, includeHeaders, result)
             if (response.statusCode) res.statusCode = response.statusCode
             setCachedHeaders(res, response.headers)
             return res.send(response.body)
@@ -332,6 +334,7 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
             maxTTL: currentMaxTTL,
             tags: requestTags,
             writeToken: writeFence.token,
+            ...(res.statusCode === 404 ? { staleTTL: 0 } : {}),
           })
         }
         trackWrite(update().catch((error) => cacheInstance.logger.error('Cache update failed:', error)))

@@ -9,7 +9,10 @@ import {
   AdaptiveCacheUpdateResult,
 } from '../types'
 import { ClusteredLruAdaptiveCacheBackend } from './ClusteredLruAdaptiveCacheBackend'
-import { RedisAdaptiveCacheBackend } from './RedisAdaptiveCacheBackend'
+import { RedisAdaptiveCacheBackend, type RevisionedFetchResult } from './RedisAdaptiveCacheBackend'
+
+const hasFreshLifetime = (result: RevisionedFetchResult | null): result is RevisionedFetchResult =>
+  Boolean(result && !result.stale && result.freshUntil > Date.now())
 
 interface InvalidationMessage {
   source: string
@@ -97,7 +100,7 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     // even while the subscriber is unavailable or still connecting.
     const generation = this.state.generation
     const redisResult = await this.redis.fetch(input)
-    if (redisResult && redisResult.ttl > 0 && generation === this.state.generation) {
+    if (hasFreshLifetime(redisResult) && generation === this.state.generation) {
       const hydration = this.lru.hydrateFromFetch(input, redisResult, token)
       this.state.hydrations.add(hydration)
       try {
@@ -128,10 +131,10 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
         if (token !== (await this.redis.captureWriteToken(input.redisPrefix))) return ['INVALIDATED', 0]
         // Use the remaining Redis lifetime: hydration latency and jitter must not extend freshness.
         const current = await this.redis.fetch({ ...input, includeDebugHeaders: true })
-        if (current && current.ttl > 0 && current.encodedData === input.encodedData) {
+        if (hasFreshLifetime(current) && current.encodedData === input.encodedData) {
           await this.lru.hydrateFromFetch({ ...input, includeDebugHeaders: true }, current, token)
         }
-        if (!current || current.ttl <= 0) await this.lru.deleteKeys([input.key])
+        if (!hasFreshLifetime(current)) await this.lru.deleteKeys([input.key])
         const changed = result[5] === 1
         if (changed) {
           await this.publishInvalidation([input.key])
@@ -174,9 +177,13 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     await this.lru.invalidateNamespace(redisPrefix)
   }
 
+  private async drainPendingUpdates() {
+    await Promise.allSettled(Array.from(this.state.pendingUpdates))
+  }
+
   public async clear(key: string, dataKey: string, metaKey: string, redisPrefix = this.redisPrefix) {
     this.state.generation++
-    await this.flush()
+    await this.drainPendingUpdates()
     await this.redis.clear(key, dataKey, metaKey, redisPrefix)
     this.state.generation++
     await Promise.allSettled([...this.state.hydrations])
@@ -187,7 +194,7 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   public async invalidateTags(tags: string[], redisPrefix: string) {
     tags = normalizeCacheTags(tags, 'L1 Redis tag invalidation').tags
     this.state.generation++
-    await this.flush()
+    await this.drainPendingUpdates()
     const redisKeys = await this.redis.invalidateTags(tags, redisPrefix)
     this.state.generation++
     await Promise.allSettled([...this.state.hydrations])
@@ -255,7 +262,7 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   public async flush() {
-    await Promise.allSettled(Array.from(this.state.pendingUpdates))
+    await this.drainPendingUpdates()
     let retried = false
     for (;;) {
       while (this.invalidationDrain) await this.invalidationDrain
@@ -306,7 +313,8 @@ export class L1RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
       message.keys.length === 0 ||
       message.keys.length > MAX_INVALIDATION_KEYS ||
       !message.keys.every(
-        (key) => typeof key === 'string' && key.length > 0 && Buffer.byteLength(key, 'utf8') <= MAX_INVALIDATION_KEY_BYTES,
+        (key) =>
+          typeof key === 'string' && key.length > 0 && Buffer.byteLength(key, 'utf8') <= MAX_INVALIDATION_KEY_BYTES,
       )
     ) {
       return

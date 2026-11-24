@@ -14,20 +14,24 @@ export type ShouldRefreshCacheUPDATE = [status: RedisStatusUPDATE, lockValue: st
 export type UpdateCacheAndReleaseLockUPDATED = [status: RedisStatusUPDATED]
 export type UpdateCacheAndReleaseLockLOCK_MISMATCH = [status: RedisStatusLOCK_MISMATCH, otherLock: string]
 
+export type AdaptiveCacheFetchTuple =
+  | [data: null, ttl: number]
+  | [
+      data: string | null | false,
+      ttl: number,
+      dataTTL?: string | number | false,
+      lastChanged?: string | number | false,
+      changeCount?: string | number | false,
+      hash?: string | false,
+      stale?: number,
+      staleAge?: number,
+      revision?: string | false,
+      remainingMs?: number,
+    ]
+
 declare module 'ioredis' {
   interface Redis {
-    adaptiveCacheFetch(
-      dataKey: string,
-    ): Promise<
-      [
-        data: string | null,
-        ttl: number,
-        dataTTL?: string | number | false,
-        lastChanged?: string | number | false,
-        changeCount?: string | number | false,
-        hash?: string | false,
-      ]
-    >
+    adaptiveCacheFetch(dataKey: string, allowStale?: string): Promise<AdaptiveCacheFetchTuple>
     adaptiveCacheUpdate(
       dataKey: string,
       metaKey: string,

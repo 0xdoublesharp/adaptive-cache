@@ -15,21 +15,6 @@ import {
 } from '../types'
 
 interface RedisFeatureCommands {
-  adaptiveCacheFetch(
-    dataKey: string,
-    allowStale: string,
-  ): Promise<
-    [
-      string | null | false,
-      number,
-      string | number | false,
-      string | number | false,
-      string | number | false,
-      string | false,
-      number?,
-      number?,
-    ]
-  >
   adaptiveCacheUpdate(...args: string[]): ReturnType<Redis['adaptiveCacheUpdate']>
   adaptiveCacheInvalidate(...args: string[]): Promise<string[]>
 }
@@ -65,7 +50,7 @@ const shouldUseTls = (redisURL: string | undefined) =>
 const shouldRejectUnauthorizedTls = () =>
   process.env.REDIS_TLS_REJECT_UNAUTHORIZED !== 'false' && process.env.REDIS_INSECURE_TLS !== 'true'
 
-export type RevisionedFetchResult = AdaptiveCacheFetchResult & { revision?: string; freshUntil?: number }
+export type RevisionedFetchResult = AdaptiveCacheFetchResult & { revision?: string; freshUntil: number }
 
 export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   public readonly name = 'redis' as const
@@ -129,9 +114,8 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
 
   public async fetch(input: AdaptiveCacheBackendFetchInput): Promise<RevisionedFetchResult | null> {
     const fetchedAt = Date.now()
-    const [cachedData, remainingTTL, dataTTL, lastChanged, changeCount, hash, stale, staleAge, revision] = await (
-      this.client as any
-    ).adaptiveCacheFetch(input.dataKey, input.allowStale ? '1' : '0')
+    const [cachedData, remainingTTL, dataTTL, lastChanged, changeCount, hash, stale, staleAge, revision, remainingMs] =
+      await this.client.adaptiveCacheFetch(input.dataKey, input.allowStale ? '1' : '0')
 
     if (!cachedData) {
       return null
@@ -151,10 +135,11 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
       }
     }
 
+    const freshMs = typeof remainingMs === 'number' ? Math.max(0, remainingMs) : Math.max(0, remainingTTL) * 1000
     return {
       encodedData: cachedData,
       revision: typeof revision === 'string' ? revision : undefined,
-      freshUntil: fetchedAt + remainingTTL * 1000,
+      freshUntil: fetchedAt + freshMs,
       ttl: remainingTTL,
       metadata,
       stale: stale === 1,

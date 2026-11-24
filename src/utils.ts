@@ -73,7 +73,7 @@ export const getAdaptiveCacheKey = (
   const queryKey =
     crypto
       .createHash('sha256')
-      .update(JSON.stringify(normalizeCacheQuery(querystring, ignoreQueryParams)))
+      .update(JSON.stringify(normalizeCacheQuery(querystring, ignoreQueryParams)) ?? 'undefined')
       .digest('hex') + ':'
   const authorityKey =
     authority === undefined

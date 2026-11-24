@@ -165,7 +165,7 @@ const hasCacheControlDirective = (value: unknown, names: string[]) => {
     String(header ?? '')
       .split(',')
       .some((directive) => {
-        const name = directive.trim().split('=', 1)[0].toLowerCase()
+        const name = directive.trim().split('=', 1)[0].trim().toLowerCase()
         return names.includes(name)
       }),
   )

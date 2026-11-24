@@ -2,7 +2,7 @@ import Redis from 'ioredis'
 import { constants as bufferConstants } from 'node:buffer'
 import crypto from 'node:crypto'
 import { performance } from 'node:perf_hooks'
-import { encode, decode, encodePayload, fingerprint } from './payload'
+import { encode, decode, encodePayload, fingerprint, fingerprintTarget } from './payload'
 import { Logger } from './lib/logger'
 import { CacheLoader } from './CacheLoader'
 import { normalizeTtlPolicy, validateTtlPolicySeed } from './ttlPolicy'
@@ -329,7 +329,10 @@ export class AdaptiveCache {
       // Hash and encode one snapshot so getters/toJSON cannot change the stored
       // value between fingerprinting and serialization.
       const customHash = this.options.fingerprint
-        ? crypto.createHash('sha256').update(this.options.fingerprint(data)).digest('hex')
+        ? crypto
+            .createHash('sha256')
+            .update(this.options.fingerprint(fingerprintTarget(data)))
+            .digest('hex')
         : undefined
       const payload = encodePayload(data)
       const responseHash = customHash ?? fingerprint(data, this.options, payload)
@@ -389,17 +392,20 @@ export class AdaptiveCache {
     )
   }
 
-  public async getMany<T = any>(keys: string[]): Promise<Map<string, AdaptiveCacheHit<T> | null>> {
+  public async getMany<T = any>(
+    keys: string[],
+    options: { allowStale?: boolean } = {},
+  ): Promise<Map<string, AdaptiveCacheHit<T> | null>> {
     this.assertOpen()
     if (!keys.length) return new Map()
     if (!this.backend.fetchMany)
-      return new Map(await Promise.all(keys.map(async (key) => [key, await this.get<T>(key)] as const)))
-    const inputs = keys.map((key) => this.fetchInput(key, {}))
+      return new Map(await Promise.all(keys.map(async (key) => [key, await this.get<T>(key, options)] as const)))
+    const inputs = keys.map((key) => this.fetchInput(key, options))
     // Defer custom backend execution until every per-key read is tracked for close().
     const batch = Promise.resolve().then(() => this.backend.fetchMany!(inputs))
     const reads = inputs.map(({ key }, index) =>
       this.track(
-        this.read<T>(key, {}, async () => {
+        this.read<T>(key, options, async () => {
           const results = await batch
           if (results.length !== inputs.length) throw new Error('Backend fetchMany result length must match inputs')
           return results[index]
@@ -470,6 +476,7 @@ export class AdaptiveCache {
     force: boolean,
     lockExpirationSeconds?: number,
   ) {
+    validateNumber('refreshThreshold', refreshThreshold)
     validateNumber('lockExpirationSeconds', lockExpirationSeconds, 0, false)
     const currentTime = Math.floor(Date.now() / 1000)
     const effectiveLockSeconds =

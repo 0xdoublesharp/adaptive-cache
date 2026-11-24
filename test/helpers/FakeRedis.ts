@@ -246,6 +246,7 @@ export class FakeRedis {
       stale ? 1 : 0,
       Math.max(0, -remaining),
       revision,
+      Math.max(0, remaining),
     ]
   }
 
