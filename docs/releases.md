@@ -28,6 +28,17 @@ Default HTTP identity excludes only scalar `refresh=true`. Other refresh values 
 
 These version-specific notes describe changes from earlier releases. Use the current feature documentation for a new installation.
 
+### Upgrading to 0.5.0
+
+Version 0.5.0 hardens core loader coordination, Redis Lua and L1 invalidation, HTTP isolation and privacy, adds formal TLA+ and Lean 4 verification, and updates optional clustered-LRU support to `2.1.5`. See the [0.5.0 changelog](../CHANGELOG.md#050---2026-11-23) for the full release notes.
+
+1. Upgrade optional peer `@0xdoublesharp/lru-cache-clustered` to `^2.1.5` when using `l1-redis` or `clustered-lru`. Redis-only consumers do not need this peer.
+2. Account for the `:v` suffix on varied HTTP cache keys (`varyBy` configured). Unvaried default keys are unchanged; existing varied entries miss once and repopulate cleanly under the new collision-free suffix.
+3. Review `shouldCache(req, res)` predicates that inspect custom non-replayable headers. Declare those headers in `policyHeaders: ['X-My-Policy']` so read-side checks receive them without replaying them on the wire.
+4. Expect stricter fail-closed validation on invalid inputs: ill-formed Unicode surrogates in tags, user keys inside `<prefix>__adaptive:`, out-of-range TTLs (`> 2147483647` seconds), and non-plain `varyBy` callback returns (such as `Map` or `Set`) now reject or bypass caching instead of corrupting state or collapsing tenants. Conditional `If-Match` and `If-Unmodified-Since` requests now bypass cache reuse so origins can return `412 Precondition Failed`.
+
+When upgrading from a release earlier than 0.4.0, also follow the relevant notes below.
+
 ### Upgrading to 0.4.0
 
 Version 0.4.0 adds configurable resource limits and atomic clustered-LRU lease release. See the [0.4.0 changelog](../CHANGELOG.md#040---2026-11-08) for the full release notes.

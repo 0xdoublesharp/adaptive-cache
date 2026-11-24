@@ -255,7 +255,9 @@ describe('Backend feature guarantees', () => {
     const l1 = new L1RedisAdaptiveCacheBackend(redis, lru, 'a:', logger, 'await-redis')
     try {
       await l1.update({ ...input(), ttlJitter: 0.5, writeToken: await l1.captureWriteToken('a:') })
-      expect((await l1.fetch(fetchInput()))?.layer).toBe('redis')
+      const hit = await l1.fetch(fetchInput())
+      expect(hit?.layer).toBe('l1')
+      expect(hit?.encodedData).toBe('old')
       await l1.invalidateNamespace('a:')
       expect(await l1.fetch(fetchInput())).toBeNull()
     } finally {

@@ -1,78 +1,135 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="620" viewBox="0 0 760 620" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="648" viewBox="0 0 920 648" role="img" aria-labelledby="title desc">
   <title id="title">Adaptive Cache Architecture</title>
-  <desc id="desc">Express, Fastify, or direct API calls enter Adaptive Cache, which chooses Redis, L1 Redis, or clustered LRU backends.</desc>
+  <desc id="desc">Express and Fastify adapters pass through HTTP policy and key framing into CacheLoader coordination alongside Direct Cache API calls, then through the codec, fingerprint, and TTL engine into redis, l1-redis, or clustered-lru backends.</desc>
   <defs>
-    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8fb6ff" />
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1120" />
+      <stop offset="100%" stop-color="#111827" />
+    </linearGradient>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#60a5fa" />
+    </marker>
+    <marker id="arrowTeal" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#2dd4bf" />
     </marker>
     <style>
-      .bg { fill: #0f172a; }
-      .panel { fill: #111827; stroke: #334155; stroke-width: 2; }
-      .panel2 { fill: #172033; stroke: #3b4b66; stroke-width: 2; }
-      .accent { fill: #1d4ed8; stroke: #93c5fd; stroke-width: 2; }
-      .lru { fill: #0f766e; stroke: #5eead4; stroke-width: 2; }
-      .redis { fill: #7f1d1d; stroke: #fca5a5; stroke-width: 2; }
-      .text { fill: #e5edf7; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-      .muted { fill: #b6c3d8; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-      .tiny { font-size: 15px; }
-      .small { font-size: 17px; }
-      .label { font-size: 22px; font-weight: 700; }
-      .title { font-size: 28px; font-weight: 800; }
-      .arrow { stroke: #8fb6ff; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .font { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+      .title { fill: #f8fafc; font-size: 24px; font-weight: 750; letter-spacing: -0.02em; }
+      .subtitle { fill: #94a3b8; font-size: 14px; font-weight: 450; }
+      .section { fill: #cbd5e1; font-size: 11.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+      .card-title { fill: #f8fafc; font-size: 15.5px; font-weight: 700; }
+      .card-body { fill: #cbd5e1; font-size: 12.5px; font-weight: 400; }
+      .card-muted { fill: #94a3b8; font-size: 12px; font-weight: 400; }
+      .badge-text { fill: #e2e8f0; font-size: 12px; font-weight: 600; }
+      .arrow { stroke: #60a5fa; stroke-width: 2; fill: none; marker-end: url(#arrowBlue); }
+      .arrow-dashed { stroke: #2dd4bf; stroke-width: 1.75; stroke-dasharray: 5 4; fill: none; marker-end: url(#arrowTeal); }
     </style>
   </defs>
 
-  <rect class="bg" width="760" height="620" rx="24" />
+  <!-- Canvas -->
+  <rect x="1" y="1" width="918" height="646" rx="20" fill="url(#bgGrad)" stroke="#1e293b" stroke-width="2" />
 
-  <text class="text title" x="36" y="52">Adaptive Cache</text>
-  <text class="muted small" x="36" y="82">Server response caching with adaptive TTLs and optional bounded L1 reads.</text>
+  <!-- Header -->
+  <text class="font title" x="36" y="44">Adaptive Cache Architecture</text>
+  <text class="font subtitle" x="36" y="68">HTTP middleware, coalesced loading, adaptive TTLs, and fenced Redis / clustered-LRU storage</text>
 
-  <rect class="panel" x="36" y="122" width="190" height="104" rx="14" />
-  <text class="text label" x="66" y="160">Your app</text>
-  <text class="muted tiny" x="66" y="189">Express, Fastify,</text>
-  <text class="muted tiny" x="66" y="211">or direct API</text>
+  <!-- Band 1: Entrypoints -->
+  <text class="font section" x="36" y="98">1. Entrypoints</text>
 
-  <path class="arrow" d="M 226 174 L 279 174" />
+  <rect x="36" y="108" width="268" height="72" rx="12" fill="#172033" stroke="#334155" stroke-width="1.5" />
+  <text class="font card-title" x="54" y="133">Express Adapter</text>
+  <text class="font card-muted" x="54" y="153">Handler &amp; loader middleware, debug</text>
+  <text class="font card-muted" x="54" y="170">headers, 404 negative caching</text>
 
-  <rect class="accent" x="292" y="108" width="214" height="132" rx="16" />
-  <text class="text label" x="324" y="147">AdaptiveCache</text>
-  <text class="text tiny" x="324" y="177">hash response body</text>
-  <text class="text tiny" x="324" y="199">grow stable TTLs</text>
-  <text class="text tiny" x="324" y="221">reset changed TTLs</text>
+  <rect x="326" y="108" width="268" height="72" rx="12" fill="#172033" stroke="#334155" stroke-width="1.5" />
+  <text class="font card-title" x="344" y="133">Fastify Adapter</text>
+  <text class="font card-muted" x="344" y="153">Raw header snapshot, onSend policy,</text>
+  <text class="font card-muted" x="344" y="170">coalesced candidate publication</text>
 
-  <path class="arrow" d="M 506 174 L 560 174" />
+  <rect x="616" y="108" width="268" height="72" rx="12" fill="#172033" stroke="#334155" stroke-width="1.5" />
+  <text class="font card-title" x="634" y="133">Direct Cache API</text>
+  <text class="font card-muted" x="634" y="153">get / set / getMany / getOrSet,</text>
+  <text class="font card-muted" x="634" y="170">tag &amp; namespace invalidation, close()</text>
 
-  <rect class="panel2" x="574" y="108" width="150" height="132" rx="16" />
-  <text class="text label" x="598" y="147">Backend</text>
-  <text class="muted tiny" x="598" y="177">selected per</text>
-  <text class="muted tiny" x="598" y="199">route or cache</text>
-  <text class="muted tiny" x="598" y="221">instance</text>
+  <!-- Clean routing from Entrypoints into Band 2 (no label crossing!) -->
+  <!-- Express & Fastify -> HTTP Policy & Key Framing -->
+  <path class="arrow" d="M 170 180 L 170 214" />
+  <path class="arrow" d="M 460 180 L 460 198 L 230 198 L 230 214" />
+  <!-- Direct Cache API -> CacheLoader & AdaptiveCache Core -->
+  <path class="arrow" d="M 750 180 L 750 198 L 460 198 L 460 214" />
 
-  <path class="arrow" d="M 649 240 L 649 286" />
+  <!-- Band 2: Core Pipeline Container -->
+  <rect x="36" y="218" width="848" height="148" rx="16" fill="#0f172a" stroke="#334155" stroke-width="1.5" />
+  <text class="font section" x="56" y="242">2. Policy, Coordination &amp; Adaptive Engine</text>
 
-  <rect class="panel2" x="36" y="304" width="688" height="204" rx="18" />
-  <text class="text label" x="66" y="344">Backend modes</text>
+  <rect x="56" y="254" width="256" height="96" rx="12" fill="#172554" stroke="#3b82f6" stroke-width="1.5" />
+  <text class="font card-title" x="72" y="278">HTTP Policy &amp; Keys</text>
+  <text class="font card-body" x="72" y="299">• Auth, Cookie, Vary &amp; Range gates</text>
+  <text class="font card-body" x="72" y="317">• If-Match, privacy &amp; policyHeaders</text>
+  <text class="font card-body" x="72" y="335">• Collision-free authority &amp; :v keys</text>
 
-  <rect class="redis" x="66" y="366" width="186" height="112" rx="12" />
-  <text class="text small" x="88" y="398">redis</text>
-  <text class="text tiny" x="88" y="424">Redis Lua stores</text>
-  <text class="text tiny" x="88" y="446">payloads, metadata,</text>
-  <text class="text tiny" x="88" y="468">tags, and locks.</text>
+  <path class="arrow" d="M 312 302 L 329 302" />
 
-  <rect class="lru" x="286" y="366" width="186" height="112" rx="12" />
-  <text class="text small" x="308" y="398">l1-redis</text>
-  <text class="text tiny" x="308" y="424">Clustered LRU serves</text>
-  <text class="text tiny" x="308" y="446">hot reads; Redis Lua</text>
-  <text class="text tiny" x="308" y="468">stays authoritative.</text>
+  <rect x="332" y="254" width="256" height="96" rx="12" fill="#1e3a8a" stroke="#60a5fa" stroke-width="1.5" />
+  <text class="font card-title" x="348" y="278">CacheLoader &amp; Core</text>
+  <text class="font card-body" x="348" y="299">• Per-key coalescing &amp; abort signals</text>
+  <text class="font card-body" x="348" y="317">• Distributed leases &amp; deadlines</text>
+  <text class="font card-body" x="348" y="335">• SWR, staleIfError &amp; negative TTL</text>
 
-  <rect class="panel" x="506" y="366" width="186" height="112" rx="12" />
-  <text class="text small" x="528" y="398">clustered-lru</text>
-  <text class="muted tiny" x="528" y="424">No Redis required.</text>
-  <text class="muted tiny" x="528" y="446">Volatile, bounded,</text>
-  <text class="muted tiny" x="528" y="468">host-local cache.</text>
+  <path class="arrow" d="M 588 302 L 605 302" />
 
-  <rect class="panel" x="36" y="526" width="688" height="58" rx="14" />
-  <text class="text label" x="66" y="563">Cached envelope</text>
-  <text class="muted tiny" x="266" y="550">encoded payload, hash, adaptive TTL metadata, tags, timestamps</text>
-  <text class="muted tiny" x="266" y="572">L1 entries are size-bounded; oversized entries are skipped.</text>
+  <rect x="608" y="254" width="256" height="96" rx="12" fill="#2e1065" stroke="#a78bfa" stroke-width="1.5" />
+  <text class="font card-title" x="624" y="278">Codec, Hash &amp; TTLs</text>
+  <text class="font card-body" x="624" y="299">• Lossless ignoreFields fingerprint</text>
+  <text class="font card-body" x="624" y="317">• Bounded gzip / base64 codec</text>
+  <text class="font card-body" x="624" y="335">• Adaptive, AIMD &amp; EWMA policies</text>
+
+  <!-- Connector Band 2 -> Band 3 -->
+  <path class="arrow" d="M 460 366 L 460 392" />
+
+  <!-- Band 3: Backend Layer -->
+  <rect x="36" y="396" width="848" height="168" rx="16" fill="#0f172a" stroke="#334155" stroke-width="1.5" />
+  <text class="font section" x="56" y="422">3. Pluggable Backends (selected per cache or route)</text>
+
+  <!-- redis -->
+  <rect x="56" y="436" width="256" height="112" rx="12" fill="#450a0a" stroke="#f87171" stroke-width="1.5" />
+  <text class="mono card-title" x="74" y="462">redis</text>
+  <text class="font card-muted" x="132" y="462">(default)</text>
+  <text class="font card-body" x="74" y="486">• 7 atomic Redis Lua scripts</text>
+  <text class="font card-body" x="74" y="506">• Write tokens, tag epochs &amp; locks</text>
+  <text class="font card-body" x="74" y="526">• Cross-host authoritative store</text>
+
+  <!-- l1-redis -->
+  <rect x="332" y="436" width="256" height="112" rx="12" fill="#042f2e" stroke="#2dd4bf" stroke-width="1.5" />
+  <text class="mono card-title" x="350" y="462">l1-redis</text>
+  <text class="font card-muted" x="438" y="462">(hot paths)</text>
+  <text class="font card-body" x="350" y="486">• Bounded clustered LRU + Redis</text>
+  <text class="font card-body" x="350" y="506">• Revision check on every L1 hit</text>
+  <text class="font card-body" x="350" y="526">• Pub/Sub drain &amp; ms hydration</text>
+
+  <!-- Pub/Sub + Validation arrow between l1-redis and redis -->
+  <path class="arrow-dashed" d="M 332 492 L 315 492" />
+
+  <!-- clustered-lru -->
+  <rect x="608" y="436" width="256" height="112" rx="12" fill="#1e293b" stroke="#64748b" stroke-width="1.5" />
+  <text class="mono card-title" x="626" y="462">clustered-lru</text>
+  <text class="font card-muted" x="760" y="462">(no Redis)</text>
+  <text class="font card-body" x="626" y="486">• Single-host / Node cluster LRU</text>
+  <text class="font card-body" x="626" y="506">• Primary IPC + atomic lock release</text>
+  <text class="font card-body" x="626" y="526">• Byte-bounded envelopes &amp; tags</text>
+
+  <!-- Band 4: Guarantees Strip -->
+  <rect x="36" y="580" width="848" height="46" rx="12" fill="#172033" stroke="#334155" stroke-width="1.5" />
+  <rect x="52" y="591" width="174" height="24" rx="12" fill="#1e293b" stroke="#475569" stroke-width="1" />
+  <text class="font badge-text" x="139" y="607" text-anchor="middle">Write-Token Fencing</text>
+
+  <rect x="242" y="591" width="212" height="24" rx="12" fill="#1e293b" stroke="#475569" stroke-width="1" />
+  <text class="font badge-text" x="348" y="607" text-anchor="middle">Tag Epochs &amp; Bounded Cleanup</text>
+
+  <rect x="470" y="591" width="194" height="24" rx="12" fill="#1e293b" stroke="#475569" stroke-width="1" />
+  <text class="font badge-text" x="567" y="607" text-anchor="middle">64 MiB Codec Ceiling</text>
+
+  <rect x="680" y="591" width="188" height="24" rx="12" fill="#1e293b" stroke="#475569" stroke-width="1" />
+  <text class="font badge-text" x="774" y="607" text-anchor="middle">TLA+ &amp; Lean 4 Verified</text>
 </svg>

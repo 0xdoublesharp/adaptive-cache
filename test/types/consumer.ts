@@ -5,9 +5,20 @@ import {
   AdaptiveCache,
   adaptiveExpressCache,
   adaptiveFastifyCache,
+  type AdaptiveCacheMetadata,
+  type AdaptiveCacheLruLocalL1Options,
   type AdaptiveCacheTtlPolicy,
   type AdaptiveCacheTtlPolicyState,
+  type HttpPolicyOptions,
+  type ExpressRequestLike,
+  type FastifyRequestLike,
 } from '../../dist/index.js'
+const metadata: AdaptiveCacheMetadata = { dataTTL: 5, changeCount: 1 }
+const localL1: AdaptiveCacheLruLocalL1Options = { enabled: true, experimental: true }
+const httpPolicy: HttpPolicyOptions = { varyBy: ['accept-language'] }
+const expressReq: ExpressRequestLike = { originalUrl: '/items', query: {} }
+const fastifyReq: FastifyRequestLike = { url: '/items', query: {} }
+void [metadata, localL1, httpPolicy, expressReq, fastifyReq]
 const policy: AdaptiveCacheTtlPolicy = { type: 'ewma', halfLifeSeconds: 30, targetChangeProbability: 0.1 }
 const cache = new AdaptiveCache({ backend: 'clustered-lru', ttlPolicy: policy })
 const value: Promise<{ id: number }> = cache.getOrSet('item', async () => ({ id: 1 }))

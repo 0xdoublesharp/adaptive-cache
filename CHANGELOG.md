@@ -2,6 +2,46 @@
 
 Notable changes by version. See [releases and maintenance](docs/releases.md) for the release workflow and compatibility reference.
 
+## 0.5.0 - 2026-11-23
+
+This release hardens L1/Redis invalidation, loader deadlines and fencing, HTTP privacy and key framing, updates `@0xdoublesharp/lru-cache-clustered` to `2.1.5`, and adds TLA+ and Lean 4 formal verification. Review the [0.5.0 upgrade notes](docs/releases.md#upgrading-to-050) before deploying.
+
+### Added
+
+- Export `AdaptiveCacheMetadata`, `AdaptiveCacheLruLocalL1Options`, `HttpPolicyOptions`, `HttpRequestLike`, `HttpResponseLike`, `ExpressRequestLike`, `ExpressResponseLike`, `FastifyRequestLike`, and `FastifyReplyLike` from the package entry point.
+- Allow batched reads to return stale entries with `getMany(keys, { allowStale: true })`.
+- Support opt-in `policyHeaders` on Express and Fastify adapters so read-side `shouldCache` checks can inspect declared non-replayable headers without persisting arbitrary headers or leaking them on the wire.
+- Add TLA+ specifications with liveness checks, trace conformance against live Redis and its L1 cache, and Lean 4 proofs (including total HTTP cache-key framing injectivity). Run `verify:tla` for the specifications, `verify:trace` for runtime conformance, `verify:lean` for the proofs, or `verify:formal` for both the specifications and proofs. See the [formal verification guide](formal/README.md).
+
+### Changed
+
+- Update `@0xdoublesharp/lru-cache-clustered` to `2.1.5` (with an exact-version release-age exception) and require optional peer version `^2.1.5` for LRU-backed modes.
+- Refresh eligible same-major development dependencies and security overrides under the seven-day release-age policy (`fastify` 5.12.8, `supertest` 7.3.2, `@typescript-eslint/eslint-plugin` and `@typescript-eslint/parser` 8.73.0, `vitest` and `@vitest/coverage-v8` 5.1.0, `eslint` 10.15.0, `prettier` 3.10.1, `vite` 8.3.8, `glob` 14.0.6, and `minimatch` 11.0.9).
+
+### Fixed
+
+- Round clustered-LRU write TTLs up to positive integer milliseconds (`Math.max(1, Math.ceil(ms))`), matching `@0xdoublesharp/lru-cache-clustered` 2.1.4+ integer-TTL validation.
+- Let `l1-redis` `clear()` and `invalidateTags()` proceed when an unrelated local L1 subscriber drain fails.
+- Use the remaining freshness in milliseconds from Redis Lua to hydrate `l1-redis`, including entries with a sub-second lifetime remaining and entries configured with `initialTTL` of one second or less.
+- Give cached Express handler 404 responses a zero stale window (`staleTTL: 0`).
+- Include cache metadata headers on Express and Fastify loader-mode hits, matching handler-mode hits.
+- Apply `ignoreFields` and custom `fingerprint` callbacks to HTTP response bodies inside the cache envelope. Exclude Express-generated ETags from the fingerprint when ignored fields are removed from the body used for hashing.
+- Bypass the local L1 for namespace generation and tag epoch checks on scalar clustered-LRU reads. Treat missing invalidation state as a cache miss when the entry depends on it.
+- Retry the clustered-LRU lock handler readiness check on the next acquisition after a transient IPC failure.
+- Handle `undefined` query values when generating keys with `getAdaptiveCacheKey()`.
+- Recognize `Cache-Control` directives with whitespace before `=`.
+- Validate `refreshThreshold` before acquiring a refresh lock.
+- Decode only a bounded base64 prefix when checking cached HTTP binary responses for compression.
+- Preserve explicit `writeToken` values passed to `getOrSet()`, enforce `lockWaitTimeoutMs` and monotonic caller deadlines across blocking loader/backend waits, track pending lock releases through `flush()` and `close()`, exclude negative entries from `staleIfError`, skip initial reads on `forceRefresh`, prevent reentrant `close()` from dropping accepted operations, and settle all `setMany()` / `clearMany()` siblings before rejecting.
+- Reject ill-formed Unicode surrogates in tags, reject user keys colliding with the reserved `__adaptive:` control namespace, validate TTL upper bounds and decode tag JSON before any Redis Lua mutations, support fractional lease durations and decimal `cache()`/`cacheResult()` durations, and skip non-enumerable properties (such as array `.length`) in `ignoreFields`.
+- Normalize numeric Redis Lua replies for `ioredis` `{ stringNumbers: true }`, treat empty string (`''`) encoded Redis payloads as valid hits, make `invalidateTags([])` a true no-op, track Lua script digests per Redis client, handle `force` and non-numeric `lastUpdate` safely in `shouldRefreshCache.lua`, include all variable envelope fields in clustered-LRU entry byte limits, and prevent local-L1 subscriber leaks when preserving a shared clustered cache on `quit(true)`.
+- Snapshot raw Fastify request headers in `onRequest` before header schema validation, honor current response privacy restrictions on Express/Fastify hits and loader joins, validate Express foreground loader late headers, preserve synchronous Fastify `reply.send()` handler semantics, settle Fastify candidate publication from transport completion, reject non-plain `varyBy` callback values, terminate varied HTTP cache keys with `:v` so varied and unvaried adapters sharing a prefix cannot collide, bypass `If-Match`/`If-Unmodified-Since` preconditions, clone bodies passed to `maxTTL` callbacks, enforce strict monotonic HTTP loader deadlines, abort HTTP loader work on premature client disconnect, support implicit `HEAD` on loader-backed routes, and capture one-shot Express `res.end(body)` responses.
+- Strip `ignoreFields` and normalize JSON whitespace on string HTTP JSON bodies losslessly without rounding integers above `Number.MAX_SAFE_INTEGER`, and track HTTP response envelopes by provenance so plain user JSON containing `__adaptiveCacheHttpResponse` is never misclassified during fingerprinting.
+
+### Compatibility notes
+
+Varied HTTP cache keys (`varyBy` configured) now terminate with `:v` so varied and unvaried adapters sharing a prefix cannot collide; existing varied entries miss once and repopulate. LRU-backed modes require optional peer `@0xdoublesharp/lru-cache-clustered@^2.1.5`. Stricter validations now reject ill-formed Unicode tags, keys starting with `<prefix>__adaptive:`, out-of-range TTLs, and non-plain `varyBy` callback values, and bypass conditional `If-Match` / `If-Unmodified-Since` requests. See [upgrading to 0.5.0](docs/releases.md#upgrading-to-050).
+
 ## 0.4.1 - 2026-11-08
 
 ### Changed

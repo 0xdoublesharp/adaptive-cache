@@ -1,6 +1,6 @@
 import { normalizeTtlPolicy } from '../ttlPolicy'
 import Redis from 'ioredis'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { Logger } from '../lib/logger'
@@ -15,24 +15,21 @@ import {
 } from '../types'
 
 interface RedisFeatureCommands {
-  adaptiveCacheFetch(
-    dataKey: string,
-    allowStale: string,
-  ): Promise<
-    [
-      string | null | false,
-      number,
-      string | number | false,
-      string | number | false,
-      string | number | false,
-      string | false,
-      number?,
-      number?,
-    ]
-  >
   adaptiveCacheUpdate(...args: string[]): ReturnType<Redis['adaptiveCacheUpdate']>
   adaptiveCacheInvalidate(...args: string[]): Promise<string[]>
+  adaptiveCacheValidate(dataKey: string, prefix: string, token: string, revision: string): Promise<number | string>
 }
+
+const registeredScripts = new WeakMap<Redis, Map<string, string>>()
+
+const assertUserKeys = (prefix: string, ...keys: string[]) => {
+  const reserved = prefix + '__adaptive:'
+  if (keys.some((key) => key.startsWith(reserved) || key === '__adaptive:legacy-barrier'))
+    throw new RangeError('Cache key uses the reserved __adaptive: namespace')
+}
+
+const asNumericReply = (value: string | number | false | undefined) =>
+  value === undefined || value === false ? value : Number(value)
 
 const asMetadataValue = (value: string | number | false | null | undefined) => {
   if (value === false || value === null || typeof value === 'undefined') return undefined
@@ -65,7 +62,7 @@ const shouldUseTls = (redisURL: string | undefined) =>
 const shouldRejectUnauthorizedTls = () =>
   process.env.REDIS_TLS_REJECT_UNAUTHORIZED !== 'false' && process.env.REDIS_INSECURE_TLS !== 'true'
 
-export type RevisionedFetchResult = AdaptiveCacheFetchResult & { revision?: string; freshUntil?: number }
+export type RevisionedFetchResult = AdaptiveCacheFetchResult & { revision?: string; freshUntil: number }
 
 export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   public readonly name = 'redis' as const
@@ -104,6 +101,7 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   private defineLuaScripts() {
+    if (typeof this.client.defineCommand !== 'function') return
     const luaPathCandidates = [path.resolve(__dirname, './redis-lua'), path.resolve(__dirname, '../redis-lua')]
     const luaPath = luaPathCandidates.find((candidate) => fs.existsSync(candidate)) || luaPathCandidates[0]
 
@@ -117,23 +115,24 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
       adaptiveCacheCleanup: { numberOfKeys: 1, file: 'adaptiveCacheCleanup.lua' },
     }
 
+    const digests = registeredScripts.get(this.client) ?? new Map<string, string>()
+    registeredScripts.set(this.client, digests)
     for (const [name, config] of Object.entries(scripts)) {
-      if (!(this.client as any)[name]) {
-        this.client.defineCommand(name, {
-          numberOfKeys: config.numberOfKeys,
-          lua: fs.readFileSync(path.join(luaPath, config.file), 'utf8'),
-        })
-      }
+      const lua = fs.readFileSync(path.join(luaPath, config.file), 'utf8')
+      const digest = createHash('sha256').update(lua).digest('hex')
+      if (typeof Reflect.get(this.client, name) === 'function' && digests.get(name) === digest) continue
+      this.client.defineCommand(name, { numberOfKeys: config.numberOfKeys, lua })
+      digests.set(name, digest)
     }
   }
 
   public async fetch(input: AdaptiveCacheBackendFetchInput): Promise<RevisionedFetchResult | null> {
+    assertUserKeys(input.redisPrefix, input.key, input.dataKey, input.metaKey)
     const fetchedAt = Date.now()
-    const [cachedData, remainingTTL, dataTTL, lastChanged, changeCount, hash, stale, staleAge, revision] = await (
-      this.client as any
-    ).adaptiveCacheFetch(input.dataKey, input.allowStale ? '1' : '0')
+    const [cachedData, remainingTTL, dataTTL, lastChanged, changeCount, hash, stale, staleAge, revision, remainingMs] =
+      await this.client.adaptiveCacheFetch(input.dataKey, input.allowStale ? '1' : '0')
 
-    if (!cachedData) {
+    if (cachedData === null || cachedData === false || typeof cachedData === 'undefined') {
       return null
     }
 
@@ -151,24 +150,35 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
       }
     }
 
+    const ttl = Number(remainingTTL)
+    const milliseconds = Number(remainingMs)
+    const freshMs = Math.max(0, Number.isFinite(milliseconds) ? milliseconds : ttl * 1000)
     return {
       encodedData: cachedData,
       revision: typeof revision === 'string' ? revision : undefined,
-      freshUntil: fetchedAt + remainingTTL * 1000,
-      ttl: remainingTTL,
+      freshUntil: fetchedAt + freshMs,
+      ttl,
       metadata,
-      stale: stale === 1,
-      staleAge: Number(staleAge || 0) / 1000,
+      stale: Number(stale) === 1,
+      staleAge: Number(staleAge ?? 0) / 1000,
       layer: 'redis',
     }
   }
 
   public async validateRevision(dataKey: string, prefix: string, token: string, revision?: string) {
+    assertUserKeys(prefix, dataKey)
     if (!revision) return false
-    return (await (this.client as any).adaptiveCacheValidate(dataKey, prefix, token, revision)) === 1
+    const result = await (this.client as unknown as RedisFeatureCommands).adaptiveCacheValidate(
+      dataKey,
+      prefix,
+      token,
+      revision,
+    )
+    return Number(result) === 1
   }
 
   public async update(input: AdaptiveCacheBackendUpdateInput): Promise<AdaptiveCacheUpdateResult> {
+    assertUserKeys(input.redisPrefix, input.key, input.dataKey, input.metaKey)
     const encodedTags = normalizeCacheTags(input.tags, 'Redis cache write').encoded
     const result = await (this.client as unknown as RedisFeatureCommands).adaptiveCacheUpdate(
       input.dataKey,
@@ -192,6 +202,9 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     )
 
     const [status, ttl, ...metadata] = result
+    for (const index of [0, 1, 3] as const) {
+      if (index < metadata.length) metadata[index] = asNumericReply(metadata[index])
+    }
     return [status, Number(ttl), ...metadata]
   }
 
@@ -207,11 +220,12 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     throw new Error('Redis cannot retain invalidation barriers')
   }
 
-  public async clear(key: string, _dataKey: string, _metaKey: string, redisPrefix?: string) {
+  public async clear(key: string, dataKey: string, metaKey: string, redisPrefix = '') {
+    assertUserKeys(redisPrefix, key, dataKey, metaKey)
     await (this.client as unknown as RedisFeatureCommands).adaptiveCacheInvalidate(
       '__adaptive:legacy-barrier',
       'clear',
-      redisPrefix || '',
+      redisPrefix,
       key,
       '[]',
       randomUUID(),
@@ -232,13 +246,14 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   public async invalidateTags(tags: string[], redisPrefix: string): Promise<string[]> {
-    const encodedTags = normalizeCacheTags(tags, 'Redis tag invalidation').encoded
+    const normalized = normalizeCacheTags(tags, 'Redis tag invalidation')
+    if (!normalized.tags.length) return []
     const detached = await (this.client as unknown as RedisFeatureCommands).adaptiveCacheInvalidate(
       '__adaptive:legacy-barrier',
       'tags',
       redisPrefix,
       '',
-      encodedTags,
+      normalized.encoded,
       randomUUID(),
       randomUUID(),
     )
@@ -321,9 +336,11 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
     lockValue: string,
   ) {
     const lockKey = lastUpdateKey + '-lock'
-    const lockExpiration = lockExpirationSeconds * 1000
+    const lockExpiration = Math.ceil(lockExpirationSeconds * 1000)
+    if (!Number.isSafeInteger(lockExpiration) || lockExpiration <= 0)
+      throw new RangeError('Redis refresh lease must be a positive safe integer number of milliseconds')
 
-    return this.client.shouldRefreshCache(
+    const result = await this.client.shouldRefreshCache(
       lastUpdateKey,
       lockKey,
       currentTime,
@@ -332,6 +349,8 @@ export class RedisAdaptiveCacheBackend implements AdaptiveCacheBackend {
       lockValue,
       force ? 1 : 0,
     )
+    if (result[0] === 'EXISTS') result[1] = Number(result[1])
+    return result
   }
 
   public async releaseLock(lastUpdateKey: string, currentTime: number, lockValue: string, recordRefresh = true) {

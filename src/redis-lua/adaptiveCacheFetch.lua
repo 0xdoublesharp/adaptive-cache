@@ -21,6 +21,7 @@ else
   freshUntil = tonumber(state[3])
 end
 local ttl = redis.call('TTL', dataKey)
+local remainingMs = math.max(0, redis.call('PTTL', dataKey))
 local stale = false
 local staleAge = 0
 if freshUntil then
@@ -29,9 +30,10 @@ if freshUntil then
   local remaining = freshUntil - nowMs
   stale = remaining <= 0
   if stale and ARGV[1] ~= '1' then return {false, 0} end
-  -- Floor prevents an L1 hydration from extending Redis freshness.
+  -- Floor preserves integer-second TTL semantics; remainingMs preserves sub-second freshness.
   ttl = math.max(0, math.floor(remaining / 1000))
+  remainingMs = math.max(0, remaining)
   staleAge = math.max(0, -remaining)
 end
 local meta = redis.call('HMGET', metaKey, 'dataTTL', 'lastChanged', 'changeCount', 'hash')
-return {data, ttl, meta[1] or false, meta[2] or false, meta[3] or false, meta[4] or false, stale and 1 or 0, staleAge, revision}
+return {data, ttl, meta[1] or false, meta[2] or false, meta[3] or false, meta[4] or false, stale and 1 or 0, staleAge, revision, remainingMs}

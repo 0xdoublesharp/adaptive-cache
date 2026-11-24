@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="472" viewBox="0 0 920 472" role="img" aria-labelledby="title desc">
+  <title id="title">Adaptive Cache Request, TTL, and Invalidation Lifecycle</title>
+  <desc id="desc">Shows how reads check freshness and revisions, how misses coalesce under refresh leases to fingerprint and adapt TTLs, and how invalidations fence in-flight writes.</desc>
+  <defs>
+    <linearGradient id="flowBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b1120" />
+      <stop offset="100%" stop-color="#111827" />
+    </linearGradient>
+    <marker id="arrBlue" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#60a5fa" />
+    </marker>
+    <marker id="arrGreen" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#34d399" />
+    </marker>
+    <marker id="arrAmber" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#fbbf24" />
+    </marker>
+    <marker id="arrRose" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#fb7185" />
+    </marker>
+    <style>
+      .font { font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+      .title { fill: #f8fafc; font-size: 22px; font-weight: 750; letter-spacing: -0.02em; }
+      .subtitle { fill: #94a3b8; font-size: 13.5px; font-weight: 450; }
+      .section { fill: #cbd5e1; font-size: 11.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; }
+      .node-title { fill: #f8fafc; font-size: 14.5px; font-weight: 700; }
+      .node-sub { fill: #cbd5e1; font-size: 12px; font-weight: 400; }
+      .edge-label { fill: #93c5fd; font-size: 11.5px; font-weight: 600; }
+      .edge-green { fill: #6ee7b7; font-size: 11.5px; font-weight: 600; }
+      .edge-amber { fill: #fcd34d; font-size: 11.5px; font-weight: 600; }
+      .edge-rose { fill: #fda4af; font-size: 11.5px; font-weight: 600; }
+      .line-blue { stroke: #60a5fa; stroke-width: 2; fill: none; marker-end: url(#arrBlue); }
+      .line-green { stroke: #34d399; stroke-width: 2; fill: none; marker-end: url(#arrGreen); }
+      .line-amber { stroke: #fbbf24; stroke-width: 2; fill: none; marker-end: url(#arrAmber); }
+      .line-amber-dash { stroke: #fbbf24; stroke-width: 1.75; stroke-dasharray: 5 4; fill: none; marker-end: url(#arrAmber); }
+      .line-rose { stroke: #fb7185; stroke-width: 2; fill: none; marker-end: url(#arrRose); }
+    </style>
+  </defs>
+
+  <rect x="1" y="1" width="918" height="470" rx="20" fill="url(#flowBg)" stroke="#1e293b" stroke-width="2" />
+
+  <!-- Header -->
+  <text class="font title" x="36" y="42">Request, Adaptive TTL &amp; Fencing Flow</text>
+  <text class="font subtitle" x="36" y="64">Coalesced reads, fingerprint-driven TTL adaptation, and write-token invalidation fencing</text>
+
+  <!-- Row 1: Read & Hit Fast Path -->
+  <text class="font section" x="36" y="96">Read &amp; Hit Path</text>
+
+  <rect x="36" y="106" width="160" height="66" rx="11" fill="#172033" stroke="#334155" stroke-width="1.5" />
+  <text class="font node-title" x="116" y="133" text-anchor="middle">Request / Call</text>
+  <text class="font node-sub" x="116" y="153" text-anchor="middle">Policy &amp; key framing</text>
+
+  <path class="line-blue" d="M 196 139 L 230 139" />
+
+  <rect x="234" y="106" width="194" height="66" rx="11" fill="#172554" stroke="#3b82f6" stroke-width="1.5" />
+  <text class="font node-title" x="331" y="133" text-anchor="middle">L1 / Redis Lookup</text>
+  <text class="font node-sub" x="331" y="153" text-anchor="middle">Revision &amp; freshness check</text>
+
+  <!-- Fresh Hit -->
+  <path class="line-green" d="M 428 124 L 680 124" />
+  <text class="font edge-green" x="554" y="117" text-anchor="middle">Fresh hit (revision matches)</text>
+
+  <!-- SWR Stale Hit -->
+  <path class="line-amber-dash" d="M 428 154 L 680 154" />
+  <text class="font edge-amber" x="554" y="148" text-anchor="middle">Stale hit (SWR: serve &amp; refresh async)</text>
+
+  <rect x="684" y="106" width="200" height="66" rx="11" fill="#064e3b" stroke="#34d399" stroke-width="1.5" />
+  <text class="font node-title" x="784" y="133" text-anchor="middle">Return / Replay</text>
+  <text class="font node-sub" x="784" y="153" text-anchor="middle">Cloned body + replay headers</text>
+
+  <!-- Clean Miss path down to Row 2 (zero text overlap!) -->
+  <path class="line-blue" d="M 331 172 L 331 200 L 128 200 L 128 236" />
+  <text class="font edge-label" x="342" y="194">Miss / forceRefresh / SWR refresh</text>
+
+  <!-- Row 2: Miss, Coalesce, Fingerprint & Adapt TTL -->
+  <text class="font section" x="148" y="228">Load, Fingerprint &amp; Adaptive Write</text>
+
+  <rect x="36" y="240" width="184" height="74" rx="11" fill="#1e3a8a" stroke="#60a5fa" stroke-width="1.5" />
+  <text class="font node-title" x="128" y="266" text-anchor="middle">Coalesce &amp; Lease</text>
+  <text class="font node-sub" x="128" y="286" text-anchor="middle">Capture write token</text>
+  <text class="font node-sub" x="128" y="302" text-anchor="middle">+ acquire refresh lock</text>
+
+  <path class="line-blue" d="M 220 277 L 246 277" />
+
+  <rect x="250" y="240" width="184" height="74" rx="11" fill="#2e1065" stroke="#a78bfa" stroke-width="1.5" />
+  <text class="font node-title" x="342" y="266" text-anchor="middle">Origin &amp; Hash</text>
+  <text class="font node-sub" x="342" y="286" text-anchor="middle">Run handler / loader</text>
+  <text class="font node-sub" x="342" y="302" text-anchor="middle">SHA-256 (ignoreFields)</text>
+
+  <!-- Hash unchanged vs changed -->
+  <path class="line-green" d="M 434 260 L 478 260" />
+  <path class="line-amber" d="M 434 294 L 478 294" />
+
+  <rect x="482" y="236" width="166" height="36" rx="8" fill="#064e3b" stroke="#34d399" stroke-width="1.25" />
+  <text class="font edge-green" x="565" y="258" text-anchor="middle">Same hash → Grow TTL</text>
+
+  <rect x="482" y="282" width="166" height="36" rx="8" fill="#451a03" stroke="#fbbf24" stroke-width="1.25" />
+  <text class="font edge-amber" x="565" y="304" text-anchor="middle">Changed → Reset TTL</text>
+
+  <path class="line-blue" d="M 648 254 L 666 254 L 666 277 L 680 277" />
+  <path class="line-blue" d="M 648 300 L 666 300 L 666 277 L 680 277" />
+
+  <rect x="684" y="240" width="200" height="74" rx="11" fill="#042f2e" stroke="#2dd4bf" stroke-width="1.5" />
+  <text class="font node-title" x="784" y="266" text-anchor="middle">Atomic Fenced Write</text>
+  <text class="font node-sub" x="784" y="286" text-anchor="middle">Verify token &amp; lease</text>
+  <text class="font node-sub" x="784" y="302" text-anchor="middle">Store + reconcile L1</text>
+
+  <!-- Return arrow up from Atomic Fenced Write to Return / Replay -->
+  <path class="line-green" d="M 784 240 L 784 176" />
+  <text class="font edge-green" x="794" y="212">Serve fresh</text>
+
+  <!-- Row 3: Invalidation Fencing -->
+  <text class="font section" x="36" y="362">Invalidation &amp; Barrier Fencing</text>
+
+  <rect x="36" y="372" width="262" height="72" rx="11" fill="#4c0519" stroke="#fb7185" stroke-width="1.5" />
+  <text class="font node-title" x="167" y="399" text-anchor="middle">Invalidation Trigger</text>
+  <text class="font node-sub" x="167" y="419" text-anchor="middle">clear() · invalidateTags()</text>
+  <text class="font node-sub" x="167" y="435" text-anchor="middle">invalidateNamespace()</text>
+
+  <path class="line-rose" d="M 298 408 L 338 408" />
+
+  <rect x="342" y="372" width="256" height="72" rx="11" fill="#172033" stroke="#fb7185" stroke-width="1.5" />
+  <text class="font node-title" x="470" y="399" text-anchor="middle">Advance Barrier &amp; Epochs</text>
+  <text class="font node-sub" x="470" y="419" text-anchor="middle">Increment write barrier &amp; tag epoch</text>
+  <text class="font node-sub" x="470" y="435" text-anchor="middle">Bounded async cleanup + Pub/Sub</text>
+
+  <path class="line-rose" d="M 598 408 L 638 408" />
+
+  <rect x="642" y="372" width="242" height="72" rx="11" fill="#172033" stroke="#fb7185" stroke-width="1.5" />
+  <text class="font node-title" x="763" y="399" text-anchor="middle">Fenced Coherence</text>
+  <text class="font node-sub" x="763" y="419" text-anchor="middle">Obsolete writes rejected atomically</text>
+  <text class="font node-sub" x="763" y="435" text-anchor="middle">Stale L1 entries rejected on read</text>
+
+  <!-- Fence arrow up to Atomic Fenced Write -->
+  <path class="line-rose" d="M 784 372 L 784 318" />
+  <text class="font edge-rose" x="794" y="349">Rejects stale token</text>
+</svg>

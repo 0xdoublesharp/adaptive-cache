@@ -7,6 +7,7 @@ import type {
 import { calculatePolicyTTL } from '../ttlCalculation'
 
 export const METADATA_SIZE_OVERHEAD_BYTES = 512
+const ENVELOPE_STRUCTURE_OVERHEAD_BYTES = 256
 
 export interface LruEnvelope {
   encodedData: string
@@ -122,10 +123,8 @@ export function createEnvelope(
 }
 
 export function estimateEnvelopeSize(envelope: LruEnvelope) {
+  const { encodedData, ...metadata } = envelope
   return (
-    Buffer.byteLength(envelope.encodedData, 'utf8') +
-    Buffer.byteLength(JSON.stringify(envelope.tags), 'utf8') +
-    Buffer.byteLength(JSON.stringify(envelope.epochs || {}), 'utf8') +
-    METADATA_SIZE_OVERHEAD_BYTES
+    Buffer.byteLength(encodedData) + Buffer.byteLength(JSON.stringify(metadata)) + ENVELOPE_STRUCTURE_OVERHEAD_BYTES
   )
 }

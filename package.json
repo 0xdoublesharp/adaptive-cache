@@ -1,6 +1,6 @@
 {
   "name": "@0xdoublesharp/adaptive-cache",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Adaptive caching module for Redis with Fastify and Express integration",
   "author": "Justin Silver",
   "license": "MIT",
@@ -63,37 +63,41 @@
     "test:types": "tsc --ignoreConfig --noEmit --strict --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --skipLibCheck test/types/consumer.ts",
     "bench:lru": "node --expose-gc scripts/benchmark-lru-upgrade.mjs",
     "test:packed": "node scripts/packed-package-smoke.mjs",
-    "test:compat": "node scripts/packed-package-smoke.mjs all"
+    "test:compat": "node scripts/packed-package-smoke.mjs all",
+    "verify:tla": "node scripts/verify-tla.mjs",
+    "verify:trace": "REQUIRE_TLA_TRACE=1 vitest run test/TlaTraceConformance.test.ts",
+    "verify:lean": "node scripts/verify-lean.mjs",
+    "verify:formal": "pnpm run verify:tla && pnpm run verify:lean"
   },
   "dependencies": {
     "debug": "^4.4.3",
     "ioredis": "^6.0.0"
   },
   "devDependencies": {
-    "@0xdoublesharp/lru-cache-clustered": "2.1.3",
+    "@0xdoublesharp/lru-cache-clustered": "2.1.5",
     "@eslint/js": "^10.0.1",
     "@types/debug": "^4.1.13",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.6",
     "@types/supertest": "^7.2.1",
-    "@typescript-eslint/eslint-plugin": "^8.72.1",
-    "@typescript-eslint/parser": "^8.72.1",
-    "@vitest/coverage-v8": "^5.0.5",
-    "eslint": "^10.14.0",
+    "@typescript-eslint/eslint-plugin": "^8.73.0",
+    "@typescript-eslint/parser": "^8.73.0",
+    "@vitest/coverage-v8": "^5.1.0",
+    "eslint": "^10.15.0",
     "eslint-config-prettier": "^10.1.8",
     "express": "^5.3.0",
     "fast-check": "^4.10.2",
-    "fastify": "^5.12.7",
+    "fastify": "^5.12.8",
     "lru-cache": "^11.5.3",
-    "prettier": "^3.9.10",
-    "supertest": "^7.3.1",
+    "prettier": "^3.10.1",
+    "supertest": "^7.3.2",
     "testcontainers": "^12.2.1",
     "tsup": "^8.5.1",
     "typescript": "^6.0.3",
-    "vitest": "^5.0.5"
+    "vitest": "^5.1.0"
   },
   "peerDependencies": {
-    "@0xdoublesharp/lru-cache-clustered": "^2.1.3",
+    "@0xdoublesharp/lru-cache-clustered": "^2.1.5",
     "express": "^4.18.2 || ^5.0.0",
     "fastify": "^4.0.0 || ^5.12.6",
     "lru-cache": "^11.0.0"

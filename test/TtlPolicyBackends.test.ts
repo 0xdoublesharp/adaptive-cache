@@ -45,6 +45,7 @@ describe('TTL policy backend parity', () => {
   beforeAll(async () => {
     container = await new GenericContainer('redis:alpine').withExposedPorts(6379).start()
     client = new Redis({ host: container.getHost(), port: container.getMappedPort(6379) })
+    redis = new RedisAdaptiveCacheBackend(client, logger)
     // Run the production Lua atomically in real Redis, replacing only its clock with an explicit fixture.
     for (const [name, numberOfKeys] of [
       ['adaptiveCacheUpdate', 2],
@@ -56,7 +57,6 @@ describe('TTL policy backend parity', () => {
         lua: lua.replaceAll("redis.call('TIME')", "redis.call('HMGET', 'test:clock', 'seconds', 'micros')"),
       })
     }
-    redis = new RedisAdaptiveCacheBackend(client, logger)
   })
   beforeEach(async () => {
     await client.flushall()

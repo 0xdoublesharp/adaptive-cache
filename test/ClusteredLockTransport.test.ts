@@ -1,7 +1,11 @@
 import cluster from 'node:cluster'
 import process from 'node:process'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { installClusteredLockHandler, releasePrimaryLock, requestClusteredLock } from '../src/backends/clusteredLruLocks'
+import {
+  installClusteredLockHandler,
+  releasePrimaryLock,
+  requestClusteredLock,
+} from '../src/backends/clusteredLruLocks'
 
 vi.mock('node:process', async () => {
   const { EventEmitter } = await import('node:events')
@@ -165,7 +169,10 @@ describe('clustered primary lock handler', () => {
       primary.emit('message', client, message)
     expect(client.send).not.toHaveBeenCalled()
     primary.emit('message', client, { ...valid, operation: 'ready' })
-    expect(client.send).toHaveBeenCalledWith({ source, id: 'id', result: undefined, error: undefined }, expect.any(Function))
+    expect(client.send).toHaveBeenCalledWith(
+      { source, id: 'id', result: undefined, error: undefined },
+      expect.any(Function),
+    )
     expect(getCache).not.toHaveBeenCalled()
   })
 
@@ -209,9 +216,10 @@ describe('clustered primary lock handler', () => {
     const client = worker()
     const store = cache()
     if (mode === 'disconnected') client.isConnected.mockReturnValue(false)
-    else client.send.mockImplementation(() => {
-      throw new Error('closed')
-    })
+    else
+      client.send.mockImplementation(() => {
+        throw new Error('closed')
+      })
     installClusteredLockHandler(() => store)
     expect(() => primary.emit('message', client, { source, id: 'id', ...request })).not.toThrow()
     expect(store.delete).toHaveBeenCalledWith('refresh-lock')
@@ -221,9 +229,8 @@ describe('clustered primary lock handler', () => {
 describe('clustered backend lock transport wiring', () => {
   it('bootstraps the peer and routes primary releases through its public cache registry', async () => {
     vi.resetModules()
-    const { ClusteredLruAdaptiveCacheBackend: Backend, bootstrapClusteredLru } = await import(
-      '../src/backends/ClusteredLruAdaptiveCacheBackend'
-    )
+    const { ClusteredLruAdaptiveCacheBackend: Backend, bootstrapClusteredLru } =
+      await import('../src/backends/ClusteredLruAdaptiveCacheBackend')
     const store = { get: () => 'owner', set: vi.fn(), delete: vi.fn() }
     const bootstrap = vi.fn()
     const load = vi.spyOn(Backend, 'loadModule').mockReturnValue({
@@ -246,9 +253,8 @@ describe('clustered backend lock transport wiring', () => {
   it('checks readiness once before worker acquisition and requires an atomic release result', async () => {
     primary.isPrimary = false
     primary.isWorker = true
-    const { ClusteredLruAdaptiveCacheBackend: Backend, bootstrapClusteredLru } = await import(
-      '../src/backends/ClusteredLruAdaptiveCacheBackend'
-    )
+    const { ClusteredLruAdaptiveCacheBackend: Backend, bootstrapClusteredLru } =
+      await import('../src/backends/ClusteredLruAdaptiveCacheBackend')
     const { Logger } = await import('../src/lib/logger')
     const backend = new Backend(undefined, new Logger('silent'))
     const getCache = vi.spyOn(backend as any, 'getCache').mockResolvedValue({
@@ -267,6 +273,36 @@ describe('clustered backend lock transport wiring', () => {
       expect(await backend.releaseLock('refresh', 100, 'owner')).toEqual(['UPDATED'])
       ipc.send.mockImplementation((sent: any) => ipc.emit('message', { source, id: sent.id }))
       await expect(backend.releaseLock('refresh', 100, 'owner')).rejects.toThrow('no lock result')
+    } finally {
+      getCache.mockRestore()
+    }
+  })
+
+  it('retries worker lock readiness after a transient IPC timeout', async () => {
+    primary.isPrimary = false
+    primary.isWorker = true
+    const { ClusteredLruAdaptiveCacheBackend: Backend } =
+      await import('../src/backends/ClusteredLruAdaptiveCacheBackend')
+    const { Logger } = await import('../src/lib/logger')
+    const backend = new Backend({ timeout: 50 }, new Logger('silent'))
+    const getCache = vi.spyOn(backend as any, 'getCache').mockResolvedValue({
+      get: async (key: string) => (key.endsWith('-lock') ? 'owner' : undefined),
+      setIfAbsent: async () => true,
+    })
+    let attempts = 0
+    ipc.send.mockImplementation((sent: any, callback: (error: null) => void) => {
+      callback(null)
+      if (sent.operation === 'ready' && ++attempts === 1) return
+      ipc.emit('message', reply(sent, sent.operation === 'ready' ? undefined : ['UPDATED']))
+    })
+    try {
+      const first = expect(backend.shouldRefresh('refresh', 0, 100, false, 60, 'owner')).rejects.toThrow(
+        'bootstrapClusteredLru()',
+      )
+      await vi.advanceTimersByTimeAsync(50)
+      await first
+      expect(await backend.shouldRefresh('refresh', 0, 100, false, 60, 'owner')).toEqual(['UPDATE', 'owner'])
+      expect(attempts).toBe(2)
     } finally {
       getCache.mockRestore()
     }

@@ -1,12 +1,18 @@
 -- Invalidation is O(number of requested tags), independent of member count.
 local prefix = ARGV[2]
+local operation = ARGV[1]
+local tags
+if operation ~= 'namespace' and operation ~= 'clear' then
+  tags = cjson.decode(ARGV[4])
+  if #tags == 0 then return {} end
+end
 local barrier = prefix ~= '' and prefix .. '__adaptive:barrier' or KEYS[1]
 redis.call('SET', barrier, ARGV[5])
-if ARGV[1] == 'namespace' then
+if operation == 'namespace' then
   redis.call('SET', prefix .. '__adaptive:namespace', ARGV[6])
   return {}
 end
-if ARGV[1] == 'clear' then
+if operation == 'clear' then
   local key = ARGV[3]
   local dataKey = key .. 'data'
   local old = redis.call('HMGET', dataKey .. ':state', 'prefix', 'tags')
@@ -28,7 +34,7 @@ if ARGV[1] == 'clear' then
   return {key}
 end
 local detached = {}
-for index, tag in ipairs(cjson.decode(ARGV[4])) do
+for index, tag in ipairs(tags) do
   local epochKey = prefix .. '__adaptive:tag-epoch:' .. tag
   redis.call('DEL', epochKey)
   local indexKey = prefix .. '__adaptive:tag-index:' .. tag

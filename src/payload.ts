@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import zlib from 'node:zlib'
 import { promisify } from 'node:util'
+import { isEncodedHttpResponse } from './httpResponse'
 import type { AdaptiveCacheOptions } from './types'
 
 const gzip = promisify(zlib.gzip)
@@ -66,8 +67,8 @@ const decodePayload = (raw: string): any => {
 
 const isCompressed = (value: any) => {
   const data =
-    value?.__adaptiveCacheHttpResponse === 1 && value.isBuffer === true && typeof value.body === 'string'
-      ? Buffer.from(value.body, 'base64')
+    isEncodedHttpResponse(value) && value.isBuffer === true && typeof value.body === 'string'
+      ? Buffer.from(value.body.slice(0, 16), 'base64')
       : value
   return (
     Buffer.isBuffer(data) &&
@@ -124,20 +125,139 @@ export async function decode(encoded: string, options: AdaptiveCacheOptions): Pr
   return decodePayload(enforcePayloadSize(raw, maxDecodedBytes))
 }
 
+const isJsonContentType = (value: unknown): boolean => {
+  if (typeof value !== 'string') return false
+  const mediaType = value.split(';', 1)[0].trim().toLowerCase()
+  return mediaType === 'application/json' || mediaType.endsWith('+json')
+}
+
+const parseJsonObject = (value: string) => {
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+type LosslessJson =
+  | { kind: 'object'; fields: Map<string, LosslessJson> }
+  | { kind: 'array'; items: LosslessJson[] }
+  | { kind: 'scalar'; text: string }
+
+const serializeLosslessJson = (value: LosslessJson): string => {
+  if (value.kind === 'object') {
+    const fields = Array.from(value.fields, ([key, entry]) => `${JSON.stringify(key)}:${serializeLosslessJson(entry)}`)
+    return `{${fields.join(',')}}`
+  }
+  if (value.kind === 'array') return `[${value.items.map(serializeLosslessJson).join(',')}]`
+  return value.text
+}
+
+const canonicalizeJsonBody = (body: string, ignoreFields: string[]): string | undefined => {
+  // JSON.parse validates quoted tokens. Number tokens retain their original spelling.
+  const tokens =
+    /[ \t\r\n]*("(?:[^"\\]|\\[\s\S])*"|-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null|[{}[\]:,])/y
+  const readToken = () => {
+    const match = tokens.exec(body)
+    if (!match) throw new SyntaxError('Expected a JSON token')
+    return match[1]
+  }
+  const readList = (close: string, readItem: (token: string) => void) => {
+    let token = readToken()
+    if (token === close) return
+    while (true) {
+      readItem(token)
+      const separator = readToken()
+      if (separator === close) return
+      if (separator !== ',') throw new SyntaxError(`Expected a comma or ${close}`)
+      token = readToken()
+    }
+  }
+  const readValue = (token: string): LosslessJson => {
+    if (token === '{') {
+      const fields = new Map<string, LosslessJson>()
+      readList('}', (key) => {
+        if (key[0] !== '"' || readToken() !== ':') throw new SyntaxError('Expected a JSON property')
+        fields.set(JSON.parse(key), readValue(readToken()))
+      })
+      return { kind: 'object', fields }
+    }
+    if (token === '[') {
+      const items: LosslessJson[] = []
+      readList(']', (item) => items.push(readValue(item)))
+      return { kind: 'array', items }
+    }
+    if ('}]:,'.includes(token)) throw new SyntaxError('Expected a JSON value')
+    return { kind: 'scalar', text: token[0] === '"' ? JSON.stringify(JSON.parse(token)) : token }
+  }
+
+  try {
+    const root = readValue(readToken())
+    if (root.kind === 'scalar' || /[^ \t\r\n]/.test(body.slice(tokens.lastIndex))) return undefined
+    for (const fieldPath of ignoreFields) {
+      const fields = fieldPath.split('.')
+      let cursor: LosslessJson | undefined = root
+      for (const field of fields.slice(0, -1)) {
+        cursor = cursor?.kind === 'object' ? cursor.fields.get(field) : undefined
+      }
+      if (cursor?.kind === 'object') cursor.fields.delete(fields[fields.length - 1])
+    }
+    return serializeLosslessJson(root)
+  } catch {
+    return undefined
+  }
+}
+
+const stripIgnoredFields = (target: any, ignoreFields: string[]) => {
+  for (const fieldPath of ignoreFields) {
+    const fields = fieldPath.split('.')
+    let cursor = target
+    for (const field of fields.slice(0, -1)) {
+      if (!cursor || typeof cursor !== 'object' || !Object.prototype.hasOwnProperty.call(cursor, field)) {
+        cursor = undefined
+        break
+      }
+      cursor = cursor[field]
+    }
+    const leaf = fields[fields.length - 1]
+    if (cursor && typeof cursor === 'object' && Object.prototype.propertyIsEnumerable.call(cursor, leaf)) {
+      delete cursor[leaf]
+    }
+  }
+}
+
+export function fingerprintTarget(data: any): any {
+  if (!isEncodedHttpResponse(data)) return data
+  if (data.isBuffer && typeof data.body === 'string') return Buffer.from(data.body, 'base64')
+  if (typeof data.body === 'string' && isJsonContentType(data.headers?.['content-type'])) {
+    return parseJsonObject(data.body) ?? data.body
+  }
+  return data.body
+}
+
 export function fingerprint(data: any, options: AdaptiveCacheOptions, raw: string): string {
   if (options.ignoreFields?.length && data && typeof data === 'object' && !Buffer.isBuffer(data)) {
+    const isHttp = isEncodedHttpResponse(data)
     const input = decodePayload(raw)
-    for (const path of options.ignoreFields) {
-      const fields = path.split('.')
-      let cursor = input
-      for (const field of fields.slice(0, -1)) {
-        if (!cursor || typeof cursor !== 'object' || !Object.prototype.hasOwnProperty.call(cursor, field)) {
-          cursor = undefined
-          break
+    if (isHttp) {
+      let jsonBody = false
+      if (!input.isBuffer) {
+        if (input.body && typeof input.body === 'object') {
+          jsonBody = true
+          stripIgnoredFields(input.body, options.ignoreFields)
+        } else if (typeof input.body === 'string' && isJsonContentType(input.headers?.['content-type'])) {
+          const canonical = canonicalizeJsonBody(input.body, options.ignoreFields)
+          if (canonical !== undefined) {
+            jsonBody = true
+            input.body = canonical
+          }
         }
-        cursor = cursor[field]
       }
-      if (cursor && typeof cursor === 'object') delete cursor[fields[fields.length - 1]]
+      // Express auto-generates ETag from raw JSON bytes including optional or volatile ignored fields.
+      if (jsonBody && input.headers) delete input.headers.etag
+    } else {
+      stripIgnoredFields(input, options.ignoreFields)
     }
     return crypto.createHash('sha256').update(encodePayload(input)).digest('hex')
   }

@@ -32,6 +32,13 @@ import {
 
 const DEFAULT_LRU_MAX_SIZE_BYTES = 64 * 1024 * 1024
 const entrySize = (key: string, valueBytes: number) => Buffer.byteLength(key, 'utf8') + valueBytes
+const toLruTtlMs = (ms: number) => Math.max(1, Math.ceil(ms))
+
+const assertUserKeys = (prefix: string, ...keys: string[]) => {
+  const reserved = prefix + '__adaptive:'
+  if (keys.some((key) => key.startsWith(reserved) || key === '__adaptive:legacy-barrier'))
+    throw new RangeError('Cache key uses the reserved __adaptive: namespace')
+}
 
 const validateByteLimit = (name: string, value: number) => {
   if (!Number.isSafeInteger(value) || value <= 0) throw new RangeError(`${name} must be a positive safe integer`)
@@ -53,6 +60,14 @@ type ClusteredCache = {
   clearLocal?(): void
   withoutLocal?(): ClusteredCache
 }
+
+type SharedLocalCache = { key: string; cache: ClusteredCache; users: number }
+
+// The peer only detaches its subscriber when it destroys the primary cache.
+// Keep one subscribed wrapper per configuration ready for preserving reopens.
+const sharedLocalCaches = new Map<string, SharedLocalCache>()
+const sortOptions = (_key: string, value: unknown) =>
+  value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).sort()) : value
 
 // Expiry belongs to each member; refreshing one member never renews another.
 const liveTagMembers = async (cache: ClusteredCache, key: string) => {
@@ -80,6 +95,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
   private readonly maxEntrySizeBytes: number
   private cachePromise?: Promise<ClusteredCache>
   private cache?: ClusteredCache
+  private sharedLocalCache?: SharedLocalCache
   private lockHandlerReady?: Promise<unknown>
   private closed = false
   private listeners = new Set<(event: AdaptiveCacheEvent) => void>()
@@ -132,8 +148,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   private assertGenerationFits(key: string) {
-    if (entrySize(key, 64) > this.maxEntrySizeBytes)
-      throw new Error('Clustered LRU cannot retain invalidation state')
+    if (entrySize(key, 64) > this.maxEntrySizeBytes) throw new Error('Clustered LRU cannot retain invalidation state')
   }
 
   private async setGeneration(key: string) {
@@ -181,25 +196,28 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
   public async fetch(
     input: AdaptiveCacheBackendFetchInput,
   ): Promise<(AdaptiveCacheFetchResult & { writeToken?: string; revision?: string; freshUntil?: number }) | null> {
+    assertUserKeys(input.redisPrefix, input.key, input.dataKey, input.metaKey)
     const cache = await this.getCache()
     const envelope = (await cache.get(input.dataKey)) as LruEnvelope | undefined
     if (!envelope || envelope.expiresAt <= Date.now()) return null
     if (
       envelope.namespaceGeneration &&
-      envelope.namespaceGeneration !== (await this.generation(input.redisPrefix + '__adaptive:namespace'))
+      envelope.namespaceGeneration !== (await cache.get(input.redisPrefix + '__adaptive:namespace', { bypassL1: true }))
     )
       return null
     for (const [key, epoch] of Object.entries(envelope.epochs || {})) {
-      if (epoch !== (await this.generation(key))) return null
+      if (epoch !== (await cache.get(key, { bypassL1: true }))) return null
     }
     return lruFetchResult(envelope, input)
   }
 
   public async fetchMany(inputs: AdaptiveCacheBackendFetchInput[]) {
+    for (const input of inputs) assertUserKeys(input.redisPrefix, input.key, input.dataKey, input.metaKey)
     return fetchLruMany(await this.getCache(), inputs)
   }
 
   public async update(input: AdaptiveCacheBackendUpdateInput): Promise<AdaptiveCacheUpdateResult> {
+    assertUserKeys(input.redisPrefix, input.key, input.dataKey, input.metaKey)
     input = { ...input, tags: normalizeCacheTags(input.tags, 'Clustered LRU cache write').tags }
     return this.serialize(async () => {
       // Read epochs before checking the loader's barrier. An invalidation after this
@@ -237,22 +255,26 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
 
       envelope.epochs = epochs
       await this.removeTags(input.key, input.dataKey)
-      if (!(await this.storeEnvelope(input.dataKey, envelope))) {
+      if (!(await this.storeEnvelope(input.dataKey, envelope, false))) {
         await Promise.all([cache.delete(input.metaKey), cache.delete(input.dataKey + ':epoch')])
+        await this.reportEvictions(cache)
         return ['INVALIDATED', 0]
       }
-      await cache.set(input.metaKey, metadataFromEnvelope(envelope), {
-        ttl: input.metaTTL * 1000,
-        size: entrySize(input.metaKey, METADATA_SIZE_OVERHEAD_BYTES),
+      const metadata = metadataFromEnvelope(envelope)
+      await cache.set(input.metaKey, metadata, {
+        ttl: toLruTtlMs(input.metaTTL * 1000),
+        size: entrySize(input.metaKey, Buffer.byteLength(JSON.stringify(metadata)) + METADATA_SIZE_OVERHEAD_BYTES),
         updateL1: true,
       })
       await this.storeTags(input.redisPrefix, input.key, input.tags, envelope.expiresAt)
+      await this.reportEvictions(cache)
 
       return ['CACHED', next.dataTTL, next.lastChanged, next.changeCount, input.responseHash, next.changed ? 1 : 0]
     })
   }
 
   public async storeConservative(input: AdaptiveCacheBackendUpdateInput) {
+    assertUserKeys(input.redisPrefix, input.key, input.dataKey, input.metaKey)
     input = { ...input, tags: normalizeCacheTags(input.tags, 'Clustered LRU cache write').tags }
     const envelope = createEnvelope(input, {
       dataTTL: input.initialTTL,
@@ -270,6 +292,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
     result: AdaptiveCacheFetchResult & { revision?: string; freshUntil?: number },
     writeToken?: string,
   ) {
+    assertUserKeys(input.redisPrefix, input.key, input.dataKey, input.metaKey)
     const dataTTL = Math.max(0, result.ttl)
     const expiresAt = result.freshUntil ?? Date.now() + dataTTL * 1000
     if (expiresAt <= Date.now()) return
@@ -293,6 +316,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   public async hydrateFromUpdate(input: AdaptiveCacheBackendUpdateInput, result: AdaptiveCacheUpdateResult) {
+    assertUserKeys(input.redisPrefix, input.key, input.dataKey, input.metaKey)
     input = { ...input, tags: normalizeCacheTags(input.tags, 'Clustered LRU cache write').tags }
     const [, dataTTL, lastChanged, changeCount, hash] = result
     const effectiveTTL = Math.max(1, toFiniteNumber(dataTTL, input.initialTTL))
@@ -319,7 +343,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
       if (!Object.keys(next).length) await cache.delete(tagKey)
       else
         await cache.set(tagKey, next, {
-          ttl: Math.max(1, await cache.getRemainingTTL(tagKey)),
+          ttl: toLruTtlMs(await cache.getRemainingTTL(tagKey)),
           size: entrySize(tagKey, Buffer.byteLength(JSON.stringify(next)) + METADATA_SIZE_OVERHEAD_BYTES),
           updateL1: true,
         })
@@ -327,6 +351,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   public async clear(key: string, dataKey: string, metaKey: string, redisPrefix?: string) {
+    assertUserKeys(redisPrefix ?? '', key, dataKey, metaKey)
     return this.serialize(async () => {
       const epochKey = dataKey + ':epoch'
       this.assertGenerationFits(epochKey)
@@ -340,6 +365,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
 
   public async invalidateTags(tags: string[], redisPrefix: string) {
     tags = normalizeCacheTags(tags, 'Clustered LRU tag invalidation').tags
+    if (tags.length === 0) return []
     return this.serialize(async () => {
       const epochKeys = tags.map((tag) => redisPrefix + '__adaptive:tag-epoch:' + tag)
       epochKeys.forEach((key) => this.assertGenerationFits(key))
@@ -379,7 +405,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
         if (!Object.keys(next).length) await cache.delete(tagKey)
         else
           await cache.set(tagKey, next, {
-            ttl: Math.max(1, await cache.getRemainingTTL(tagKey)),
+            ttl: toLruTtlMs(await cache.getRemainingTTL(tagKey)),
             size: entrySize(tagKey, Buffer.byteLength(JSON.stringify(next)) + METADATA_SIZE_OVERHEAD_BYTES),
             updateL1: true,
           })
@@ -419,7 +445,10 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
           recordRefresh: false,
         },
         this.options.timeout ?? 100,
-      ))
+      ).catch((error) => {
+        this.lockHandlerReady = undefined
+        throw error
+      }))
     const lockKey = lastUpdateKey + '-lock'
 
     if (!force) {
@@ -430,7 +459,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
 
       for (let attempt = 0; attempt < 3; attempt++) {
         const acquired = await cache.setIfAbsent(lockKey, lockValue, {
-          ttl: lockExpirationSeconds * 1000,
+          ttl: toLruTtlMs(lockExpirationSeconds * 1000),
           size: entrySize(lockKey, Buffer.byteLength(lockValue)),
         })
         const existingLock = (await cache.get(lockKey, { bypassL1: true })) as string | undefined
@@ -441,7 +470,7 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
       throw new Error('Clustered LRU cannot retain refresh lock')
     } else {
       const stored = await cache.set(lockKey, lockValue, {
-        ttl: lockExpirationSeconds * 1000,
+        ttl: toLruTtlMs(lockExpirationSeconds * 1000),
         size: entrySize(lockKey, Buffer.byteLength(lockValue)),
         updateL1: true,
       })
@@ -477,15 +506,19 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
   }
 
   public async quit(preserveSharedCache = false) {
+    if (this.closed) return undefined
     this.closed = true
     if (!this.cachePromise) return undefined
     // Initialization may reject or stall after allocating the cache and its subscriptions.
     let cache = this.cache
     if (!cache) cache = await this.cachePromise
+    const shared = this.sharedLocalCache
+    if (shared) shared.users--
     if (preserveSharedCache) {
-      cache.clearLocal?.()
+      if (!shared || shared.users === 0) cache.clearLocal?.()
       return undefined
     }
+    if (shared?.users === 0) sharedLocalCaches.delete(shared.key)
     return cache.destroy?.()
   }
 
@@ -519,25 +552,36 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
 
     LRUCacheClustered.bootstrap?.()
 
-    const cache = new LRUCacheClustered({
+    const localL1 = this.options.localL1
+    const cacheOptions = {
       namespace: this.options.namespace || 'adaptive-cache',
       maxSize: this.maxSizeBytes,
       maxEntrySize: this.maxEntrySizeBytes,
       timeout: this.options.timeout,
       failsafe: this.options.failsafe || 'reject',
-      ...(typeof this.options.localL1 !== 'undefined' ? { localL1: this.options.localL1 } : {}),
-    }) as ClusteredCache
+      ...(typeof localL1 !== 'undefined' ? { localL1 } : {}),
+    }
+    const sharedKey =
+      typeof localL1 === 'object' &&
+      localL1.experimental &&
+      localL1.enabled !== false &&
+      localL1.invalidation !== 'ttl-only'
+        ? JSON.stringify(cacheOptions, sortOptions)
+        : undefined
+    const shared = sharedKey === undefined ? undefined : sharedLocalCaches.get(sharedKey)
+    const cache = shared?.cache ?? (new LRUCacheClustered(cacheOptions) as ClusteredCache)
     this.cache = cache
+    if (sharedKey !== undefined) {
+      this.sharedLocalCache = shared ?? { key: sharedKey, cache, users: 0 }
+      this.sharedLocalCache.users++
+      sharedLocalCaches.set(sharedKey, this.sharedLocalCache)
+    }
 
     await cache.healthCheck?.()
     return cache
   }
 
-  private async storeEnvelope(
-    dataKey: string,
-    envelope: LruEnvelope,
-    ttlSeconds = (envelope.expiresAt - Date.now()) / 1000,
-  ) {
+  private async storeEnvelope(dataKey: string, envelope: LruEnvelope, reportEvictions = true) {
     const size = entrySize(dataKey, estimateEnvelopeSize(envelope))
     if (size > this.maxEntrySizeBytes) {
       this.logger.debug('Skipping clustered LRU entry because it exceeds maxEntrySizeBytes:', dataKey, size)
@@ -548,11 +592,11 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
 
     const cache = await this.getCache()
     const stored = await cache.set(dataKey, envelope, {
-      ttl: Math.max(1, ttlSeconds * 1000),
+      ttl: toLruTtlMs(envelope.expiresAt - Date.now()),
       size,
       updateL1: true,
     })
-    await this.reportEvictions(cache)
+    if (reportEvictions) await this.reportEvictions(cache)
     return stored
   }
 
@@ -564,17 +608,14 @@ export class ClusteredLruAdaptiveCacheBackend implements AdaptiveCacheBackend {
       tags.map(async (tag) => {
         const tagKey = this.tagKey(redisPrefix, tag)
         const next = { ...(await liveTagMembers(cache, tagKey)), [key]: expiresAt }
-        const size = entrySize(
-          tagKey,
-          Buffer.byteLength(JSON.stringify(next), 'utf8') + METADATA_SIZE_OVERHEAD_BYTES,
-        )
+        const size = entrySize(tagKey, Buffer.byteLength(JSON.stringify(next), 'utf8') + METADATA_SIZE_OVERHEAD_BYTES)
         // Oversized indexes may be evicted; epoch fencing still invalidates payloads.
         if (size > this.maxEntrySizeBytes) {
           await cache.delete(tagKey)
           return
         }
         await cache.set(tagKey, next, {
-          ttl: Math.max(1, Object.values(next).reduce((maximum, expiry) => Math.max(maximum, expiry), 0) - Date.now()),
+          ttl: toLruTtlMs(Object.values(next).reduce((maximum, expiry) => Math.max(maximum, expiry), 0) - Date.now()),
           size,
           updateL1: true,
         })

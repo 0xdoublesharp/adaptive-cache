@@ -19,7 +19,7 @@ interface LoaderCache {
     data: unknown,
     options: AdaptiveCacheSetOptions,
     lease: { lockKey: string; lockValue: string },
-    signal?: AbortSignal,
+    beforeUpdate: () => void,
   ): Promise<unknown>
   resolveMaxTTL(data: unknown, options: Pick<AdaptiveCacheOptions, 'maxTTL'>): number
   acquireRefreshLock(
@@ -27,28 +27,40 @@ interface LoaderCache {
     refreshThreshold: number,
     force: boolean,
   ): ReturnType<AdaptiveCacheBackend['shouldRefresh']>
-  track<T>(promise: Promise<T>): Promise<T>
+  track<T>(operation: () => T | PromiseLike<T>): Promise<T>
   emit(event: Omit<AdaptiveCacheEvent, 'timestamp'> & { timestamp?: number }): void
 }
 
 type LoadResult<T> = { data: T; backgroundFallback?: boolean }
+class SourceError {
+  constructor(readonly reason: unknown) {}
+}
+
 interface SharedLoad {
   promise: Promise<LoadResult<any>>
   controller: AbortController
-  users: number
+  callers: Map<AbortSignal, () => void>
+  checkDeadline: () => void
 }
+
+const isMissing = (data: unknown): boolean => data === null || data === undefined
 
 // Race every awaited stage, including non-cooperative custom backends, without
 // leaving a rejection unobserved if the detached operation later fails.
-const waitFor = <T>(work: () => T | PromiseLike<T>, signal: AbortSignal): Promise<T> =>
+const waitFor = <T>(work: () => T | PromiseLike<T>, signal: AbortSignal, checkDeadline: () => void): Promise<T> =>
   new Promise<T>((resolve, reject) => {
     const aborted = () => reject(signal.reason)
     if (signal.aborted) return aborted()
     signal.addEventListener('abort', aborted, { once: true })
     void Promise.resolve()
       .then(() => {
+        checkDeadline()
         signal.throwIfAborted()
         return work()
+      })
+      .then((result) => {
+        checkDeadline()
+        return result
       })
       .then(resolve, reject)
       .finally(() => signal.removeEventListener('abort', aborted))
@@ -70,20 +82,27 @@ export class CacheLoader {
   public async getOrSet<T>(
     key: string,
     loader: (context: AdaptiveCacheLoaderContext) => Promise<T>,
-    options: AdaptiveCacheLoadOptions<T>,
+    options: AdaptiveCacheLoadOptions<T> & { loadTimeoutMs: number },
+    deadline: number,
   ): Promise<T> {
     const controller = new AbortController()
+    const signal = controller.signal
     const abort = () => controller.abort(options.signal!.reason)
     if (options.signal?.aborted) abort()
     else options.signal?.addEventListener('abort', abort, { once: true })
     this.callers.add(controller)
-    const timer = setTimeout(
-      () =>
-        controller.abort(
-          new DOMException(`Cache loader timed out after ${options.loadTimeoutMs}ms for ${key}`, 'TimeoutError'),
-        ),
-      options.loadTimeoutMs,
-    )
+    const timeOut = () =>
+      controller.abort(
+        new DOMException(`Cache loader timed out after ${options.loadTimeoutMs}ms for ${key}`, 'TimeoutError'),
+      )
+    const timer = setTimeout(timeOut, Math.max(0, Math.ceil(deadline - performance.now())))
+    const expire = () => {
+      if (performance.now() >= deadline) timeOut()
+    }
+    const checkCaller = () => {
+      expire()
+      signal.throwIfAborted()
+    }
     const dispose = () => {
       clearTimeout(timer)
       options.signal?.removeEventListener('abort', abort)
@@ -94,26 +113,38 @@ export class CacheLoader {
       const swr = options.staleWhileRevalidate ?? this.cache.options.staleWhileRevalidate ?? 0
       const sie = options.staleIfError ?? this.cache.options.staleIfError ?? 0
       const force = options.forceRefresh ?? this.cache.options.forceRefresh ?? false
-      const signal = controller.signal
-      const hit = await waitFor(() => this.cache.read<T>(key, { allowStale: swr > 0 || sie > 0 }), signal)
-      if (hit && !hit.stale && !force) return hit.data
-      const backgroundHit = !force && hit?.stale && hit.staleAge !== undefined && hit.staleAge < swr ? hit : undefined
+      checkCaller()
+      const hit = force
+        ? null
+        : await waitFor(() => this.cache.read<T>(key, { allowStale: swr > 0 || sie > 0 }), signal, expire)
+      checkCaller()
+      if (hit && !hit.stale) return hit.data
+      const backgroundHit = hit?.stale && hit.staleAge !== undefined && hit.staleAge < swr ? hit : undefined
       const getLoad = () => {
         let loading = this.loads.get(key)
+        loading?.checkDeadline()
         if (!loading || loading.controller.signal.aborted) {
           const shared = new AbortController()
-          loading = { controller: shared, users: 0, promise: undefined! }
-          const owned = loading
-          loading.promise = this.cache.track(
-            this.load(
-              key,
-              loader,
-              { ...options, staleTTL: Math.max(options.staleTTL ?? 0, swr, sie) },
-              force,
-              shared.signal,
-              backgroundHit,
+          const callers = new Map<AbortSignal, () => void>([[signal, expire]])
+          const checkDeadline = () => {
+            let active = false
+            let reason: unknown
+            for (const [caller, expire] of callers) {
+              expire()
+              if (caller.aborted) reason = caller.reason
+              else active = true
+            }
+            if (!active) shared.abort(reason)
+          }
+          loading = {
+            controller: shared,
+            callers,
+            checkDeadline,
+            promise: this.cache.track(() =>
+              this.load(key, loader, options, force, shared.signal, checkDeadline, backgroundHit),
             ),
-          )
+          }
+          const owned = loading
           this.loads.set(key, loading)
           const remove = () => {
             if (this.loads.get(key) === owned) this.loads.delete(key)
@@ -124,11 +155,12 @@ export class CacheLoader {
         return loading
       }
       const join = async (loading: SharedLoad): Promise<LoadResult<T>> => {
-        loading.users++
+        loading.callers.set(signal, expire)
         try {
-          return await waitFor(() => loading.promise, signal)
+          return await waitFor(() => loading.promise, signal, expire)
         } finally {
-          if (--loading.users === 0)
+          loading.callers.delete(signal)
+          if (loading.callers.size === 0)
             loading.controller.abort(signal.reason ?? new DOMException('No cache loader callers remain', 'AbortError'))
         }
       }
@@ -144,24 +176,31 @@ export class CacheLoader {
       try {
         for (;;) {
           const result = await join(getLoad())
+          checkCaller()
           // A foreground joiner must not inherit another caller's stale eligibility.
           if (!result.backgroundFallback) return result.data
-          signal.throwIfAborted()
         }
       } catch (error) {
-        signal.throwIfAborted()
+        checkCaller()
+        if (!(error instanceof SourceError)) throw error
         // Re-read at failure time, under the caller's remaining deadline.
         if (sie > 0) {
           try {
-            const fallback = await waitFor(() => this.cache.read<T>(key, { allowStale: true }), signal)
-            if (fallback && (!fallback.stale || (fallback.staleAge !== undefined && fallback.staleAge < sie)))
+            const fallback = await waitFor(() => this.cache.read<T>(key, { allowStale: true }), signal, expire)
+            if (
+              fallback &&
+              (!fallback.stale || (fallback.staleAge !== undefined && fallback.staleAge < sie)) &&
+              !(options.isNegative ?? isMissing)(fallback.data)
+            ) {
+              checkCaller()
               return fallback.data
+            }
           } catch {
-            signal.throwIfAborted()
             // Cache fallback failures must not replace the original source error.
           }
+          checkCaller()
         }
-        throw error
+        throw error.reason
       }
     } finally {
       if (!detached) dispose()
@@ -174,34 +213,62 @@ export class CacheLoader {
     options: AdaptiveCacheLoadOptions<T>,
     force: boolean,
     signal: AbortSignal,
+    checkDeadline: () => void,
     backgroundHit?: AdaptiveCacheHit<T>,
   ): Promise<LoadResult<T>> {
     const started = performance.now()
     const lockKey = this.cache.getKeyPrefix() + 'loader:' + key
     const waitLimit = options.lockWaitTimeoutMs ?? this.cache.options.lockWaitTimeoutMs ?? 5000
+    const lockDeadline = started + waitLimit
+    const lockWait = new AbortController()
+    const acquiring = AbortSignal.any([signal, lockWait.signal])
+    const timeOutLock = () => lockWait.abort(new Error(`Timed out waiting for cache loader lock for ${key}`))
+    const timer = setTimeout(timeOutLock, Math.ceil(waitLimit))
+    const checkLockDeadline = () => {
+      checkDeadline()
+      if (performance.now() >= lockDeadline) timeOutLock()
+    }
+    const beforeUpdate = () => {
+      checkDeadline()
+      signal.throwIfAborted()
+    }
     let lock: string | undefined
     let contended = false
-    const release = async (value: string) => {
-      try {
-        await this.cache.backend.releaseLock(lockKey, Math.floor(Date.now() / 1000), value, false)
-      } catch (error) {
-        this.cache.emit({ type: 'error', key, reason: 'lock-release', error, durationMs: performance.now() - started })
-      }
-    }
+    const release = (value: string) =>
+      this.cache.track(async () => {
+        try {
+          await this.cache.backend.releaseLock(lockKey, Math.floor(Date.now() / 1000), value, false)
+        } catch (error) {
+          this.cache.emit({
+            type: 'error',
+            key,
+            reason: 'lock-release',
+            error,
+            durationMs: performance.now() - started,
+          })
+        }
+      })
     try {
-      if (!this.cache.backend.captureWriteToken)
+      if (options.writeToken === undefined && !this.cache.backend.captureWriteToken)
         throw new Error('Backend does not support captureWriteToken required for fenced loading')
       for (;;) {
         const result = await waitFor(
           () =>
-            this.cache.acquireRefreshLock(lockKey, 0, false).then((result) => {
+            // A detached acquisition can still grant a lease. Register its release
+            // before the acquisition leaves the set of pending operations.
+            this.cache.track(async () => {
+              checkDeadline()
+              acquiring.throwIfAborted()
+              const result = await this.cache.acquireRefreshLock(lockKey, 0, false)
               if (result[0] === 'UPDATE') {
-                if (signal.aborted) void release(result[1])
+                checkLockDeadline()
+                if (acquiring.aborted) void release(result[1])
                 else lock = result[1]
               }
               return result
             }),
-          signal,
+          acquiring,
+          checkDeadline,
         )
         if (result[0] === 'UPDATE') break
         if (!contended) {
@@ -210,21 +277,36 @@ export class CacheLoader {
         }
         if (backgroundHit) return { data: backgroundHit.data, backgroundFallback: true }
         if (!force) {
-          const shared = await waitFor(() => this.cache.read<T>(key), signal)
+          const shared = await waitFor(() => this.cache.read<T>(key), acquiring, checkLockDeadline)
           if (shared) return { data: shared.data }
         }
-        const remaining = waitLimit - (performance.now() - started)
-        if (remaining <= 0) throw new Error(`Timed out waiting for cache loader lock for ${key}`)
-        await waitFor(() => new Promise((resolve) => setTimeout(resolve, Math.min(25, remaining))), signal)
+        await waitFor(
+          () => new Promise((resolve) => setTimeout(resolve, Math.min(25, lockDeadline - performance.now()))),
+          acquiring,
+          checkLockDeadline,
+        )
       }
+      clearTimeout(timer)
       if (!force) {
-        const shared = await waitFor(() => this.cache.read<T>(key), signal)
+        const shared = await waitFor(() => this.cache.read<T>(key), signal, checkDeadline)
         if (shared) return { data: shared.data }
       }
-      const writeToken = await waitFor(() => this.cache.backend.captureWriteToken!(this.cache.getKeyPrefix()), signal)
+      const writeToken =
+        options.writeToken ??
+        (await waitFor(() => this.cache.backend.captureWriteToken!(this.cache.getKeyPrefix()), signal, checkDeadline))
       this.cache.emit({ type: 'refresh', key })
-      const data = await waitFor(() => loader({ signal }), signal)
-      const negative = options.isNegative ? options.isNegative(data) : data === null || data === undefined
+      const data = await waitFor(
+        async () => {
+          try {
+            return await loader({ signal })
+          } catch (error) {
+            throw new SourceError(error)
+          }
+        },
+        signal,
+        checkDeadline,
+      )
+      const negative = (options.isNegative ?? isMissing)(data)
       const negativeTTL = options.negativeTTL ?? this.cache.options.negativeTTL ?? 0
       if ((!negative || negativeTTL > 0) && (options.shouldStore?.(data) ?? true)) {
         const maxTTL = this.cache.resolveMaxTTL(data, options)
@@ -240,23 +322,31 @@ export class CacheLoader {
                 ...(negative ? { staleTTL: 0 } : {}),
               },
               { lockKey: lockKey + '-lock', lockValue: lock! },
-              signal,
+              beforeUpdate,
             ),
           signal,
+          checkDeadline,
         )
-        await waitFor(() => this.cache.backend.flush?.(), signal)
+        await waitFor(() => this.cache.backend.flush?.(), signal, checkDeadline)
       }
       return { data }
     } catch (error) {
-      this.cache.emit({ type: 'error', key, reason: 'refresh', error, durationMs: performance.now() - started })
+      this.cache.emit({
+        type: 'error',
+        key,
+        reason: 'refresh',
+        error: error instanceof SourceError ? error.reason : error,
+        durationMs: performance.now() - started,
+      })
       throw error
     } finally {
+      clearTimeout(timer)
       if (lock !== undefined) {
         // Start cleanup even after cancellation. Do not let an unresponsive backend
         // hold the shared loader promise or overwrite its original source error.
         const releasing = release(lock)
         try {
-          await waitFor(() => releasing, signal)
+          await waitFor(() => releasing, signal, checkDeadline)
         } catch {
           /* Cancellation already reported. */
         }

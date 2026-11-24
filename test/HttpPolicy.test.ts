@@ -13,7 +13,13 @@ import {
   normalizeHeaderName,
   snapshotHttpResponse,
 } from '../src/httpPolicy'
-import { cloneHttpBody, decodeHttpResponse, encodeHttpResponse } from '../src/httpResponse'
+import {
+  cachedPolicyResponse,
+  cloneHttpBody,
+  decodeHttpResponse,
+  encodeHttpResponse,
+  isEncodedHttpResponse,
+} from '../src/httpResponse'
 
 const variedKey = (variation: unknown) =>
   buildHttpCacheKey({
@@ -73,6 +79,7 @@ describe('HTTP cache key canonicalization', () => {
     expect(buildHttpCacheKey({ ...input, varyBy: [' Accept-Language ', 'ACCEPT', 'accept'] })).toBe(
       buildHttpCacheKey({ ...input, varyBy: ['accept', 'accept-language'] }),
     )
+    expect(buildHttpCacheKey({ ...input, varyBy: ['accept'] })).toMatch(/vary:[0-9a-f]{64}:v$/)
     expect(getDeclaredVaryHeaders([' Z ', '', 'z', ' A '])).toEqual(['a', 'z'])
     expect(getDeclaredVaryHeaders(() => 'variation')).toEqual([])
     expect(buildHttpCacheKey({ ...input, req: {}, varyBy: ['accept'] })).not.toBe(
@@ -93,6 +100,14 @@ describe('HTTP cache key canonicalization', () => {
     expect(first).toBe(buildHttpCacheKey({ ...common, requestPath: '/two', query: { token: 'second' } }))
     expect(first).not.toBe(buildHttpCacheKey({ ...common, cachePrefix: 'other:' }))
     expect(first).not.toBe(buildHttpCacheKey({ ...common, key: () => '../tenant/b' }))
+    const varyBy = () => 'variant'
+    const keyShapes = [
+      first,
+      buildHttpCacheKey({ ...common, varyBy }),
+      buildHttpCacheKey({ ...common, key: undefined }),
+      buildHttpCacheKey({ ...common, key: undefined, varyBy }),
+    ]
+    expect(new Set(keyShapes).size).toBe(4)
   })
 })
 
@@ -242,6 +257,39 @@ describe('HTTP response snapshots and payload identity', () => {
       contentType: undefined,
       headers: {},
     })
+  })
+
+  it('stores only declared policy headers separately from wire headers and excludes credentials', () => {
+    const markers = ['yes', 42]
+    const encoded = encodeHttpResponse(
+      'body',
+      201,
+      undefined,
+      { 'X-Marker': markers, 'X-Missing': undefined, 'Set-Cookie': 'session=secret', ETag: 'tag', 'X-Trace': 'trace' },
+      [' X-Marker ', 'x-marker', '', 'X-Missing', 'Set-Cookie', 'ETag'],
+    )
+    expect(encoded.policyHeaders).toEqual({ 'x-marker': ['yes', '42'] })
+    expect(encoded.headers).toEqual({ etag: 'tag' })
+    markers.push('later')
+
+    const decoded = decodeHttpResponse(JSON.parse(JSON.stringify(encoded)))
+    expect(decoded.policyHeaders).toEqual({ 'x-marker': ['yes', '42'] })
+    expect(decoded.headers).toEqual({ etag: 'tag' })
+    const response = cachedPolicyResponse(decoded)
+    expect(response.statusCode).toBe(201)
+    expect(response.getHeaders()).toEqual({ etag: 'tag', 'x-marker': ['yes', '42'] })
+    expect(response.getHeader(' X-MARKER ')).toEqual(['yes', '42'])
+    expect(response.getHeader('set-cookie')).toBeUndefined()
+    expect(response.getHeader('__proto__')).toBeUndefined()
+    expect(
+      encodeHttpResponse('body', 200, undefined, { 'Set-Cookie': 'session=secret' }, ['set-cookie']),
+    ).not.toHaveProperty('policyHeaders')
+  })
+
+  it('tracks provenance for the original encoder output', () => {
+    const encoded = encodeHttpResponse('body', 200, undefined)
+    expect(isEncodedHttpResponse(encoded)).toBe(true)
+    for (const value of [{ ...encoded }, null, undefined, 'body']) expect(isEncodedHttpResponse(value)).toBe(false)
   })
 
   it('excludes Node and Web streams while accepting ordinary binary and structured bodies', async () => {
