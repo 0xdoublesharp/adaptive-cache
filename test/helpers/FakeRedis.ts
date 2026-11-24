@@ -282,6 +282,9 @@ export class FakeRedis {
       (!legacy || !barrier || !storedGeneration || writeToken !== [legacy, barrier, storedGeneration].join(':'))
     )
       return ['INVALIDATED', 0]
+    const tags: unknown = JSON.parse(tagsJSON)
+    if (!Array.isArray(tags) || tags.some((tag) => typeof tag !== 'string' || tag.length === 0))
+      throw new Error('Invalid adaptive cache tags')
     this.expireKey(dataKey + ':state')
     let old = this.stores.hashes.get(dataKey + ':state')
     const previousData = await this.get(dataKey)
@@ -289,21 +292,15 @@ export class FakeRedis {
       const previous = JSON.parse(previousData.slice('@ac-redis:1:'.length))
       old = { prefix: previous.prefix, tags: JSON.stringify(previous.tags), generation: previous.namespace }
     }
-    for (const tag of JSON.parse(old?.tags || '[]')) {
-      this.expireKey((old?.prefix || '') + 'tag:' + tag)
-      this.expireKey((old?.prefix || '') + '__adaptive:tag-index:' + tag)
-      this.stores.sets.get((old?.prefix || '') + 'tag:' + tag)?.delete(key)
-      this.stores.sortedSets.get((old?.prefix || '') + '__adaptive:tag-index:' + tag)?.delete(key)
-    }
+    const oldTags = JSON.parse(old?.tags || '[]')
     const generation = storedGeneration || uuid
-    await this.setnx(prefix + '__adaptive:namespace', generation)
-    if (old && old.generation !== generation) await this.del(metaKey)
+    const resetMetadata = old?.generation && old.generation !== generation
     const epochs: Record<string, string> = {}
 
     const initialTTL = Number(initialTTLString)
     const maxTTL = Number(maxTTLString)
     const ttlScaling = Number(ttlScalingString)
-    const meta = await this.hgetall(metaKey)
+    const meta = resetMetadata ? {} : await this.hgetall(metaKey)
     const calculated = calculateNextMetadata(
       { ...meta, ttlPolicyState: meta.ttlPolicyState ? JSON.parse(meta.ttlPolicyState) : undefined },
       hash,
@@ -313,8 +310,27 @@ export class FakeRedis {
       JSON.parse(policyJSON),
       Date.now(),
     )
-    let { dataTTL } = calculated
     const { lastChanged, changeCount, changed: isChanged } = calculated
+    const dataTTL = Math.min(calculated.dataTTL, maxTTL)
+    const freshSeconds = dataTTL * Number(jitterFactor)
+    const staleSeconds = Number(staleTTLString)
+    if (!(freshSeconds > -Infinity && staleSeconds > -Infinity)) throw new Error('Invalid adaptive cache data expiry')
+    const freshTTL = Math.max(0.001, freshSeconds)
+    const now = Date.now()
+    const freshUntil = now + Math.floor(freshTTL * 1000)
+    const retention = Math.max(1, Math.floor((freshTTL + Math.max(0, staleSeconds)) * 1000))
+    const metaPttlMs = Math.floor(Number(metaTTLString) * 1000)
+    if (!(metaPttlMs >= 1 && metaPttlMs <= 2147483647000)) throw new Error('Invalid adaptive cache metadata expiry')
+    if (!(retention >= 1 && retention <= 2147483647000)) throw new Error('Invalid adaptive cache data expiry')
+
+    await this.setnx(prefix + '__adaptive:namespace', generation)
+    if (resetMetadata) await this.del(metaKey)
+    for (const tag of oldTags) {
+      this.expireKey((old?.prefix || '') + 'tag:' + tag)
+      this.expireKey((old?.prefix || '') + '__adaptive:tag-index:' + tag)
+      this.stores.sets.get((old?.prefix || '') + 'tag:' + tag)?.delete(key)
+      this.stores.sortedSets.get((old?.prefix || '') + '__adaptive:tag-index:' + tag)?.delete(key)
+    }
     this.stores.hashes.set(metaKey, {
       hash,
       dataTTL: String(dataTTL),
@@ -322,19 +338,16 @@ export class FakeRedis {
       changeCount: String(changeCount),
       ...(calculated.ttlPolicyState ? { ttlPolicyState: JSON.stringify(calculated.ttlPolicyState) } : {}),
     })
-    dataTTL = Math.min(dataTTL, maxTTL)
-    const freshTTL = Math.max(0.001, dataTTL * Number(jitterFactor))
     this.stores.hashes.set(dataKey + ':state', {
       prefix,
       tags: tagsJSON,
       generation,
-      freshUntil: String(Date.now() + freshTTL * 1000),
+      freshUntil: String(freshUntil),
       revision: uuid,
     })
-    const retention = Math.max(1, Math.floor((freshTTL + Math.max(0, Number(staleTTLString))) * 1000))
-    const tagTTL = Math.max(retention, Number(metaTTLString) * 1000)
+    const tagTTL = Math.max(retention, metaPttlMs)
     await this.pexpire(dataKey + ':state', tagTTL)
-    for (const tag of JSON.parse(tagsJSON)) {
+    for (const tag of tags) {
       const epochKey = prefix + '__adaptive:tag-epoch:' + tag
       await this.setnx(epochKey, uuid)
       epochs[epochKey] = (await this.get(epochKey))!
@@ -360,14 +373,14 @@ export class FakeRedis {
           revision: uuid,
           prefix,
           namespace: generation,
-          freshUntil: Date.now() + freshTTL * 1000,
+          freshUntil,
           epochs,
-          tags: JSON.parse(tagsJSON),
+          tags,
         }),
       'PX',
       retention,
     )
-    await this.expire(metaKey, Number(metaTTLString))
+    await this.pexpire(metaKey, metaPttlMs)
 
     return ['CACHED', dataTTL, lastChanged, changeCount, hash, isChanged ? 1 : 0]
   }
@@ -381,6 +394,8 @@ export class FakeRedis {
     barrierUUID = randomUUID(),
     namespaceUUID = randomUUID(),
   ) {
+    const tags = operation === 'namespace' || operation === 'clear' ? [] : JSON.parse(tagsJSON)
+    if (operation !== 'namespace' && operation !== 'clear' && tags.length === 0) return []
     const barrier = prefix ? prefix + '__adaptive:barrier' : legacyKey
     await this.set(barrier, barrierUUID)
     if (operation === 'namespace') {
@@ -393,7 +408,7 @@ export class FakeRedis {
       return [key]
     }
     const detached: string[] = []
-    for (const tag of JSON.parse(tagsJSON)) {
+    for (const tag of tags) {
       await this.del(prefix + '__adaptive:tag-epoch:' + tag)
       for (const [source, kind] of [
         [prefix + '__adaptive:tag-index:' + tag, 'zset'],
@@ -481,14 +496,18 @@ export class FakeRedis {
     lockValue: string,
     force: number,
   ) {
-    const lastUpdate = force === 1 ? -1 : Number((await this.get(lastUpdateKey)) || '0')
-    if (force !== 1 && currentTime - lastUpdate < refreshThreshold) {
-      return ['EXISTS', refreshThreshold - (currentTime - lastUpdate)]
-    }
+    let lastUpdate = -1
+    if (force !== 1) {
+      const timestamp = await this.get(lastUpdateKey)
+      const timestampNumber = timestamp?.trim() ? Number(timestamp) : Number.NaN
+      if (Number.isFinite(timestampNumber)) {
+        lastUpdate = timestampNumber
+        if (currentTime - lastUpdate < refreshThreshold)
+          return ['EXISTS', refreshThreshold - (currentTime - lastUpdate)]
+      }
 
-    const existingLock = await this.get(lockKey)
-    if (force !== 1 && existingLock && existingLock !== lockValue) {
-      return ['UPDATING', existingLock]
+      const existingLock = await this.get(lockKey)
+      if (existingLock && existingLock !== lockValue) return ['UPDATING', existingLock]
     }
 
     await this.set(lockKey, lockValue, 'PX', lockExpiration)

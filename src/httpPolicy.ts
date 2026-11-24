@@ -26,6 +26,7 @@ export const snapshotHttpResponse = (response: HttpResponseLike) => {
   return {
     statusCode: response.statusCode,
     headers,
+    getHeaders: () => headers,
     getHeader: (name: string) => headers[normalizeHeaderName(name)],
   }
 }
@@ -109,16 +110,52 @@ const normalizeValue = (value: unknown): unknown => {
     }, Object.create(null))
 }
 
-const digest = (value: unknown) =>
+const digest = (value: string | unknown[]) =>
   crypto
     .createHash('sha256')
-    .update(JSON.stringify(normalizeValue(value)) ?? 'undefined')
+    .update(JSON.stringify(normalizeValue(value)))
     .digest('hex')
+
+// Retain the legacy JSON preimage for supported values. Typed extensions use
+// tokens outside JSON so an ordinary string or object cannot impersonate them.
+const serializeVariation = (value: unknown, ancestors = new Set<object>()): string | undefined => {
+  if (value === undefined) return undefined
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value)
+  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value)
+  if (typeof value !== 'object' || utilTypes.isProxy(value) || ancestors.has(value))
+    throw new TypeError('Unsupported HTTP cache variation')
+  const prototype = Object.getPrototypeOf(value)
+  if (prototype === Buffer.prototype) return JSON.stringify(Buffer.prototype.toString.call(value, 'base64'))
+  if (prototype === Uint8Array.prototype)
+    return `bytes(${JSON.stringify(Buffer.from(value as Uint8Array).toString('base64'))})`
+  if (prototype === Date.prototype) return `date(${JSON.stringify(Date.prototype.toISOString.call(value))})`
+  if (prototype !== Array.prototype && prototype !== Object.prototype && prototype !== null)
+    throw new TypeError('Unsupported HTTP cache variation')
+
+  ancestors.add(value)
+  try {
+    if (Array.isArray(value)) {
+      return `[${Array.from(value, (item) => serializeVariation(item, ancestors) ?? 'null').join(',')}]`
+    }
+    // Match JSON's integer-key order even though the canonical object was
+    // populated with lexicographically sorted keys.
+    const keys = Object.keys(value).sort()
+    const ordered = Object.keys(Object.fromEntries(keys.map((key) => [key, true])))
+    const fields = ordered.flatMap((key) => {
+      const item = serializeVariation((value as Record<string, unknown>)[key], ancestors)
+      return item === undefined ? [] : [`${JSON.stringify(key)}:${item}`]
+    })
+    return `{${fields.join(',')}}`
+  } finally {
+    ancestors.delete(value)
+  }
+}
 
 export const normalizeHeaderName = (name: string) => name.trim().toLowerCase()
 
-export const getRequestHeader = (req: HttpRequestLike, name: string): unknown => {
+export const getRequestHeader = (req: HttpRequestLike, name: string, rawHeaders?: Record<string, unknown>): unknown => {
   const normalized = normalizeHeaderName(name)
+  if (rawHeaders) return rawHeaders[normalized]
   const fromHeaders = req.headers?.[normalized]
   if (fromHeaders !== undefined) return fromHeaders
   return req.get?.(normalized) ?? req.header?.(normalized)
@@ -138,12 +175,17 @@ const hasCallerOwnedIsolation = <Req extends HttpRequestLike>(
   return getDeclaredVaryHeaders(options.varyBy).includes(sensitiveHeader)
 }
 
-export const isRequestCacheable = <Req extends HttpRequestLike>(req: Req, options: HttpPolicyOptions<Req>) => {
+export const isRequestCacheable = <Req extends HttpRequestLike>(
+  req: Req,
+  options: HttpPolicyOptions<Req>,
+  rawHeaders?: Record<string, unknown>,
+) => {
   if (req.method && req.method.toUpperCase() !== 'GET') return false
-  if (getRequestHeader(req, 'range') !== undefined || getRequestHeader(req, 'if-range') !== undefined) return false
-  if (hasCacheControlDirective(getRequestHeader(req, 'cache-control'), ['no-store', 'no-cache'])) return false
+  const header = (name: string) => getRequestHeader(req, name, rawHeaders)
+  if (['range', 'if-range', 'if-match', 'if-unmodified-since'].some((name) => header(name) !== undefined)) return false
+  if (hasCacheControlDirective(header('cache-control'), ['no-store', 'no-cache'])) return false
 
-  const authorization = getRequestHeader(req, 'authorization')
+  const authorization = header('authorization')
   if (
     authorization !== undefined &&
     (!options.cacheAuthenticated || !hasCallerOwnedIsolation(options, 'authorization'))
@@ -151,7 +193,7 @@ export const isRequestCacheable = <Req extends HttpRequestLike>(req: Req, option
     return false
   }
 
-  const cookie = getRequestHeader(req, 'cookie')
+  const cookie = header('cookie')
   if (cookie !== undefined && (!options.cacheCookies || !hasCallerOwnedIsolation(options, 'cookie'))) {
     return false
   }
@@ -192,15 +234,17 @@ export const isResponseCacheable = <Req extends HttpRequestLike>(
   const negative = response.statusCode === 404 && boundedNegativeTTL(options.negativeTTL, Number.MAX_SAFE_INTEGER)
   if (response.statusCode === 206) return false
   if (!((response.statusCode >= 200 && response.statusCode < 300) || negative)) return false
+  return hasCacheableResponseHeaders(response, options.varyBy) && options.shouldCache?.(req, response) !== false
+}
+
+export const hasCacheableResponseHeaders = (response: HttpResponseLike, varyBy: unknown) => {
   if (hasCacheControlDirective(getResponseHeader(response, 'cache-control'), ['private', 'no-store', 'no-cache']))
     return false
   if (getResponseHeader(response, 'set-cookie') !== undefined) return false
 
-  const declared = new Set(getDeclaredVaryHeaders(options.varyBy))
+  const declared = new Set(getDeclaredVaryHeaders(varyBy))
   const varied = parseVary(getResponseHeader(response, 'vary'))
-  if (varied.includes('*') || varied.some((name) => !declared.has(name))) return false
-
-  return options.shouldCache?.(req, response) !== false
+  return !varied.includes('*') && !varied.some((name) => !declared.has(name))
 }
 
 export const buildHttpCacheKey = <Req extends HttpRequestLike>(input: {
@@ -211,23 +255,31 @@ export const buildHttpCacheKey = <Req extends HttpRequestLike>(input: {
   ignoreQueryParams?: string[]
   key?: (req: Req) => string
   varyBy?: string[] | ((req: Req) => unknown)
+  rawHeaders?: Record<string, unknown>
 }) => {
   const customKey = input.key?.(input.req)
   if (input.key && (typeof customKey !== 'string' || customKey.trim().length === 0)) return undefined
   const requestPath = input.key ? `/custom/${digest(String(customKey))}` : input.requestPath
+  const header = (name: string) => getRequestHeader(input.req, name, input.rawHeaders)
   const base = getAdaptiveCacheKey(
     requestPath,
     input.key ? {} : input.query,
     input.cachePrefix,
     input.ignoreQueryParams,
-    input.key
-      ? undefined
-      : String(getRequestHeader(input.req, 'host') ?? getRequestHeader(input.req, ':authority') ?? ''),
+    input.key ? undefined : String(header('host') ?? header(':authority') ?? ''),
   )
 
   if (!input.varyBy) return base
-  const variation = Array.isArray(input.varyBy)
-    ? getDeclaredVaryHeaders(input.varyBy).map((name) => [name, getRequestHeader(input.req, name)])
-    : input.varyBy(input.req)
-  return `${base}vary:${digest(variation)}:`
+  if (Array.isArray(input.varyBy))
+    return `${base}vary:${digest(getDeclaredVaryHeaders(input.varyBy).map((name) => [name, header(name)]))}:`
+  const variation = input.varyBy(input.req)
+  try {
+    const hash = crypto
+      .createHash('sha256')
+      .update(serializeVariation(variation) ?? 'undefined')
+      .digest('hex')
+    return `${base}vary:${hash}:`
+  } catch {
+    return undefined
+  }
 }

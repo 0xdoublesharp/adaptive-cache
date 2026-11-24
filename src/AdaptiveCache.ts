@@ -7,6 +7,7 @@ import { Logger } from './lib/logger'
 import { CacheLoader } from './CacheLoader'
 import { normalizeTtlPolicy, validateTtlPolicySeed } from './ttlPolicy'
 import { normalizeCacheTags } from './tagValidation'
+import { MAX_RETENTION_SECONDS } from './utils'
 import { ClusteredLruAdaptiveCacheBackend } from './backends/ClusteredLruAdaptiveCacheBackend'
 import { L1RedisAdaptiveCacheBackend } from './backends/L1RedisAdaptiveCacheBackend'
 import { RedisAdaptiveCacheBackend } from './backends/RedisAdaptiveCacheBackend'
@@ -39,21 +40,42 @@ const validateTimer = (name: string, value: number | undefined) => {
     throw new RangeError(`${name} must be at most ${MAX_TIMER_DELAY_MS} milliseconds`)
 }
 
+const validateTTLUpperBound = (name: string, value = 0) => {
+  if (value > MAX_RETENTION_SECONDS) throw new RangeError(`${name} must be at most ${MAX_RETENTION_SECONDS} seconds`)
+}
+
+const validateRetention = (initialTTL: number, maxTTL: number | undefined, staleTTL: number) => {
+  validateTTLUpperBound('initialTTL + staleTTL', initialTTL + staleTTL)
+  validateTTLUpperBound('maxTTL + staleTTL', (maxTTL ?? 0) + staleTTL)
+}
+
+const staleRetention = (options: AdaptiveCacheLoadOptions, defaults: AdaptiveCacheOptions = {}) =>
+  Math.max(
+    options.staleTTL ?? 0,
+    options.staleWhileRevalidate ?? defaults.staleWhileRevalidate ?? 0,
+    options.staleIfError ?? defaults.staleIfError ?? 0,
+  )
+
 const validateSettings = (options: AdaptiveCacheOptions | AdaptiveCacheLoadOptions) => {
-  for (const name of [
-    'staleWhileRevalidate',
-    'staleIfError',
-    'negativeTTL',
-    'lockWaitTimeoutMs',
-    'ttlJitter',
-    'staleTTL',
-  ] as const) {
+  for (const name of ['staleWhileRevalidate', 'staleIfError', 'negativeTTL', 'staleTTL'] as const) {
     validateNumber(name, (options as AdaptiveCacheLoadOptions)[name])
+    validateTTLUpperBound(name, (options as AdaptiveCacheLoadOptions)[name])
   }
+  validateTimer('lockWaitTimeoutMs', options.lockWaitTimeoutMs)
   validateTimer('loadTimeoutMs', (options as AdaptiveCacheLoadOptions).loadTimeoutMs)
+  validateNumber('ttlJitter', options.ttlJitter)
   if (options.ttlJitter !== undefined && options.ttlJitter > 1)
     throw new RangeError('ttlJitter must be between 0 and 1')
-  if (typeof options.maxTTL === 'number') validateNumber('maxTTL', options.maxTTL, 0, false)
+  if (typeof options.maxTTL === 'number') {
+    validateNumber('maxTTL', options.maxTTL, 0, false)
+    validateTTLUpperBound('maxTTL', options.maxTTL)
+  }
+}
+
+const settleBatch = async (operations: Promise<unknown>[]) => {
+  for (const result of await Promise.allSettled(operations)) {
+    if (result.status === 'rejected') throw result.reason
+  }
 }
 
 export class AdaptiveCache {
@@ -98,6 +120,10 @@ export class AdaptiveCache {
     this.ttlPolicy = normalizeTtlPolicy(options.ttlPolicy)
     for (const name of ['initialTTL', 'ttlScaling', 'metaTTL', 'lockExpirationSeconds'] as const)
       validateNumber(name, options[name], 0, false)
+    validateTTLUpperBound('initialTTL', options.initialTTL)
+    validateTTLUpperBound('metaTTL', options.metaTTL)
+    const maxTTL = options.maxTTL ?? DEFAULT_MAX_TTL
+    validateRetention(options.initialTTL ?? 5, typeof maxTTL === 'number' ? maxTTL : undefined, staleRetention(options))
     if (options.metaTTL !== undefined && !Number.isInteger(options.metaTTL))
       throw new RangeError('metaTTL must be a positive integer number of seconds')
     validateNumber('compression.minBytes', options.compression?.minBytes)
@@ -216,7 +242,9 @@ export class AdaptiveCache {
     return { counters: { ...this.stats.counters }, hitsByLayer: { ...this.stats.hitsByLayer } }
   }
 
-  private track<T>(promise: Promise<T>): Promise<T> {
+  private track<T>(operation: () => T | PromiseLike<T>): Promise<T> {
+    // A synchronous backend hook can start close() as soon as it is invoked.
+    const promise = Promise.resolve().then(operation)
     this.pending.add(promise)
     void promise.then(
       () => this.pending.delete(promise),
@@ -227,7 +255,7 @@ export class AdaptiveCache {
 
   public async get<T = any>(key: string, options: { allowStale?: boolean } = {}): Promise<AdaptiveCacheHit<T> | null> {
     this.assertOpen()
-    return this.track(this.read<T>(key, options))
+    return this.track(() => this.read<T>(key, options))
   }
 
   private fetchInput(key: string, options: { allowStale?: boolean }): AdaptiveCacheBackendFetchInput {
@@ -290,20 +318,22 @@ export class AdaptiveCache {
     this.assertOpen()
     if (!this.backend.captureWriteToken)
       throw new Error('Backend does not support captureWriteToken required for fenced loading')
-    return this.track(this.backend.captureWriteToken(this.getKeyPrefix()))
+    return this.track(() => this.backend.captureWriteToken!(this.getKeyPrefix()))
   }
 
   public async set(key: string, data: any, options: AdaptiveCacheSetOptions = {}) {
     this.assertOpen()
-    return this.track(this.write(key, data, options))
+    return this.track(() => this.write(key, data, options))
   }
 
   public resolveMaxTTL(data: any, options: Pick<AdaptiveCacheOptions, 'maxTTL'> = {}): number {
     const requested = typeof options.maxTTL === 'function' ? options.maxTTL(data) : options.maxTTL
+    validateTTLUpperBound('maxTTL', requested)
     if (typeof requested === 'number' && Number.isFinite(requested) && requested > 0) return requested
     if (typeof this.options.maxTTL === 'number') return this.options.maxTTL
     if (typeof this.options.maxTTL === 'function') {
       const calculated = this.options.maxTTL(data)
+      validateTTLUpperBound('maxTTL', calculated)
       if (typeof calculated === 'number' && Number.isFinite(calculated) && calculated > 0) return calculated
     }
     return DEFAULT_MAX_TTL
@@ -314,7 +344,7 @@ export class AdaptiveCache {
     data: any,
     options: AdaptiveCacheSetOptions = {},
     lease?: { lockKey: string; lockValue: string },
-    signal?: AbortSignal,
+    beforeUpdate?: () => void,
   ) {
     validateSettings(options)
     const tags = normalizeCacheTags(options.tags ?? [], 'Cache write').tags
@@ -322,6 +352,8 @@ export class AdaptiveCache {
     try {
       const { initialTTL = 5, ttlScaling = 2, metaTTL = 60 * 60 * 24 * 7 } = this.options
       const maxTTL = this.resolveMaxTTL(data, options)
+      const staleTTL = options.staleTTL ?? staleRetention(this.options)
+      validateRetention(initialTTL, maxTTL, staleTTL)
       validateTtlPolicySeed(this.ttlPolicy, Math.min(initialTTL, maxTTL))
       const writeToken = options.writeToken ?? (await this.backend.captureWriteToken?.(this.getKeyPrefix()))
       if (this.options.compression?.async && writeToken === undefined)
@@ -337,7 +369,7 @@ export class AdaptiveCache {
       const payload = encodePayload(data)
       const responseHash = customHash ?? fingerprint(data, this.options, payload)
       const encodedData = await encode(data, this.options, payload)
-      signal?.throwIfAborted()
+      beforeUpdate?.()
       const result = await this.backend.update({
         key,
         dataKey: key + 'data',
@@ -352,7 +384,7 @@ export class AdaptiveCache {
         metaTTL,
         tags,
         writeToken,
-        staleTTL: options.staleTTL ?? Math.max(this.options.staleWhileRevalidate ?? 0, this.options.staleIfError ?? 0),
+        staleTTL,
         ttlJitter: options.ttlJitter ?? this.options.ttlJitter,
         ...lease,
         allowOptimistic: options.writeToken === undefined && !lease && !this.options.compression?.async,
@@ -384,12 +416,14 @@ export class AdaptiveCache {
   ): Promise<T> {
     this.assertOpen()
     validateSettings(options)
-    return this.track(
-      this.loader.getOrSet(key, loader, {
-        ...options,
-        loadTimeoutMs: this.resolveLoadTimeoutMs(options),
-      }),
-    )
+    const staleTTL = staleRetention(options, this.options)
+    const maxTTL = options.maxTTL ?? this.options.maxTTL ?? DEFAULT_MAX_TTL
+    validateRetention(this.options.initialTTL ?? 5, typeof maxTTL === 'number' ? maxTTL : undefined, staleTTL)
+    const loadTimeoutMs = this.resolveLoadTimeoutMs(options)
+    const deadline = performance.now() + loadTimeoutMs
+    const tags = normalizeCacheTags(options.tags ?? [], 'Cache write').tags
+    const loadOptions = { ...options, loadTimeoutMs, staleTTL, tags }
+    return this.track(() => this.loader.getOrSet(key, loader, loadOptions, deadline))
   }
 
   public async getMany<T = any>(
@@ -404,7 +438,7 @@ export class AdaptiveCache {
     // Defer custom backend execution until every per-key read is tracked for close().
     const batch = Promise.resolve().then(() => this.backend.fetchMany!(inputs))
     const reads = inputs.map(({ key }, index) =>
-      this.track(
+      this.track(() =>
         this.read<T>(key, options, async () => {
           const results = await batch
           if (results.length !== inputs.length) throw new Error('Backend fetchMany result length must match inputs')
@@ -419,44 +453,38 @@ export class AdaptiveCache {
     entries: Array<{ key: string; data: unknown; options?: AdaptiveCacheSetOptions }>,
   ): Promise<void> {
     this.assertOpen()
-    await Promise.all(entries.map(({ key, data, options }) => this.set(key, data, options)))
+    await settleBatch(entries.map(({ key, data, options }) => this.set(key, data, options)))
   }
 
   public async clearMany(keys: string[]): Promise<void> {
     this.assertOpen()
-    await Promise.all(keys.map((key) => this.clear(key)))
+    await settleBatch(keys.map((key) => this.clear(key)))
   }
 
   public async invalidateNamespace(): Promise<void> {
     this.assertOpen()
     if (!this.backend.invalidateNamespace) throw new Error('Backend does not support namespace invalidation')
-    return this.track(
-      (async () => {
-        await this.backend.invalidateNamespace!(this.getKeyPrefix())
-        this.emit({ type: 'invalidate', reason: 'namespace' })
-      })(),
-    )
+    return this.track(async () => {
+      await this.backend.invalidateNamespace!(this.getKeyPrefix())
+      this.emit({ type: 'invalidate', reason: 'namespace' })
+    })
   }
 
   public async invalidateTags(tags: string[]) {
     this.assertOpen()
     const normalized = normalizeCacheTags(tags, 'Cache invalidation').tags
-    return this.track(
-      (async () => {
-        await this.backend.invalidateTags(normalized, this.getKeyPrefix())
-        this.emit({ type: 'invalidate', reason: 'tags' })
-      })(),
-    )
+    return this.track(async () => {
+      await this.backend.invalidateTags(normalized, this.getKeyPrefix())
+      this.emit({ type: 'invalidate', reason: 'tags' })
+    })
   }
 
   public async clear(key: string) {
     this.assertOpen()
-    return this.track(
-      (async () => {
-        await this.backend.clear(key, key + 'data', key + 'meta', this.getKeyPrefix())
-        this.emit({ type: 'invalidate', key, reason: 'clear' })
-      })(),
-    )
+    return this.track(async () => {
+      await this.backend.clear(key, key + 'data', key + 'meta', this.getKeyPrefix())
+      this.emit({ type: 'invalidate', key, reason: 'clear' })
+    })
   }
 
   public async shouldRefresh(
@@ -466,7 +494,7 @@ export class AdaptiveCache {
     lockExpirationSeconds?: number,
   ) {
     this.assertOpen()
-    return this.track(this.acquireRefreshLock(lastUpdateKey, refreshThreshold, force, lockExpirationSeconds))
+    return this.track(() => this.acquireRefreshLock(lastUpdateKey, refreshThreshold, force, lockExpirationSeconds))
   }
 
   // Accepted loaders can finish acquiring/releasing locks while close() drains them.
@@ -500,7 +528,7 @@ export class AdaptiveCache {
   public async releaseLock(lastUpdateKey: string, lockValue: string) {
     this.assertOpen()
     const currentTime = Math.floor(Date.now() / 1000)
-    return this.track(this.backend.releaseLock(lastUpdateKey, currentTime, lockValue))
+    return this.track(() => this.backend.releaseLock(lastUpdateKey, currentTime, lockValue))
   }
 
   public quit(preserveSharedCache = false) {
@@ -538,22 +566,24 @@ export class AdaptiveCache {
           forceTeardown()
           reject(error)
         }, timeoutMs)
-        void (async () => {
-          await this.flush()
-          if (expired) return
-          this.detachBackendObserver()
-          return this.backend.quit?.(preserveSharedCache)
-        })().then(
-          (result) => {
-            clearTimeout(timer)
-            resolve(result)
-          },
-          (error) => {
-            clearTimeout(timer)
-            if (!expired) forceTeardown()
-            reject(error)
-          },
-        )
+        void Promise.resolve()
+          .then(async () => {
+            await this.flush()
+            if (expired) return
+            this.detachBackendObserver()
+            return this.backend.quit?.(preserveSharedCache)
+          })
+          .then(
+            (result) => {
+              clearTimeout(timer)
+              resolve(result)
+            },
+            (error) => {
+              clearTimeout(timer)
+              if (!expired) forceTeardown()
+              reject(error)
+            },
+          )
       })
     }
     return this.closePromise
@@ -569,6 +599,6 @@ export class AdaptiveCache {
 
   public async flush() {
     while (this.pending.size > 0) await Promise.allSettled([...this.pending])
-    return this.backend.flush?.()
+    return this.track(() => this.backend.flush?.())
   }
 }

@@ -152,7 +152,7 @@ const stripIgnoredFields = (target: any, ignoreFields: string[]) => {
       cursor = cursor[field]
     }
     const leaf = fields[fields.length - 1]
-    if (cursor && typeof cursor === 'object' && Object.prototype.hasOwnProperty.call(cursor, leaf)) {
+    if (cursor && typeof cursor === 'object' && Object.prototype.propertyIsEnumerable.call(cursor, leaf)) {
       delete cursor[leaf]
       stripped = true
     }

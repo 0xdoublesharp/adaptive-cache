@@ -23,7 +23,7 @@ describe('loader execution deadlines and cancellation', () => {
         await release.promise
         return 'late'
       },
-      { loadTimeoutMs: 15 },
+      { loadTimeoutMs: 50 },
     )
     const outcome = loading.catch((error: Error) => error)
     await started.promise

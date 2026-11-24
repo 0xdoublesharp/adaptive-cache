@@ -10,7 +10,7 @@ import { AdaptiveCache } from './AdaptiveCache'
 import { getDefaultCache, redis } from './singleton'
 import { adaptiveExpressCache, clearAdaptiveCache } from './AdaptiveExpressCache'
 import { adaptiveFastifyCache } from './AdaptiveFastifyCache'
-import { cache } from './utils'
+import { cache, MAX_RETENTION_SECONDS } from './utils'
 
 export {
   AdaptiveCacheOptions,
@@ -60,9 +60,12 @@ export type {
 
 // Util to easily cache functions outside of the controller flow
 export const cacheResult = async (key: string, timeInSeconds: number, callback: () => Promise<any>) => {
+  if (!Number.isFinite(timeInSeconds) || timeInSeconds <= 0 || timeInSeconds > MAX_RETENTION_SECONDS)
+    throw new RangeError(`cacheResult TTL must be greater than 0 and at most ${MAX_RETENTION_SECONDS} seconds`)
+  const ttlMs = Math.ceil(timeInSeconds * 1000)
   const client = getDefaultCache().client
   // try to fetch the data from redis
-  let cached = await client.get(key)
+  const cached = await client.get(key)
   if (cached) {
     // if we get a result parse it and return it
     return JSON.parse(cached)
@@ -75,7 +78,7 @@ export const cacheResult = async (key: string, timeInSeconds: number, callback: 
     return null
   }
 
-  await client.set(key, JSON.stringify(results), 'EX', timeInSeconds)
+  await client.set(key, JSON.stringify(results), 'PX', ttlMs)
 
   return results
 }

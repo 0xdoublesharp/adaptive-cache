@@ -2,14 +2,15 @@ import crypto from 'node:crypto'
 import { AdaptiveCacheOptions } from './types'
 
 const cacheTime = process.env.CACHE_TIME || '5 seconds'
+export const MAX_RETENTION_SECONDS = 2_147_483_647
 
 export const parseDuration = (duration: string | number): number => {
   if (typeof duration === 'number') return duration
   if (typeof duration === 'string') {
-    const parts = duration.split(' ')
-    const val = parseInt(parts[0])
-    if (isNaN(val)) return 5
-    const unit = parts[1]
+    const match = /^([+-]?\d+(?:\.\d+)?)\s*([a-z]*)$/i.exec(duration.trim())
+    if (!match) return 5
+    const val = Number(match[1])
+    const unit = match[2].toLowerCase()
     if (!unit) return val
     if (unit.startsWith('second')) return val
     if (unit.startsWith('minute')) return val * 60

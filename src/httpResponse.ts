@@ -1,6 +1,34 @@
-import { normalizeHttpBody } from './httpPolicy'
+import { HttpResponseLike, normalizeHttpBody, snapshotHttpResponse } from './httpPolicy'
 
 export type CachedHttpHeaders = Record<string, string | string[]>
+
+export type HttpResponseTransport = {
+  writableEnded: boolean
+  prependOnceListener: (event: string, listener: () => void) => unknown
+  removeListener: (event: string, listener: () => void) => unknown
+}
+
+export const watchHttpResponse = (
+  transport: HttpResponseTransport,
+  response: HttpResponseLike,
+): { completion: Promise<ReturnType<typeof snapshotHttpResponse> | undefined>; signal: AbortSignal } => {
+  const controller = new AbortController()
+  let resolve!: (value?: ReturnType<typeof snapshotHttpResponse>) => void
+  const completion = new Promise<ReturnType<typeof snapshotHttpResponse> | undefined>((done) => (resolve = done))
+  const finish = () => settle(true)
+  const close = () => settle(false)
+  const settle = (finished: boolean) => {
+    transport.removeListener('finish', finish)
+    transport.removeListener('close', close)
+    transport.removeListener('error', close)
+    if (!finished && !transport.writableEnded) controller.abort()
+    resolve(finished ? snapshotHttpResponse(response) : undefined)
+  }
+  transport.prependOnceListener('finish', finish)
+  transport.prependOnceListener('close', close)
+  transport.prependOnceListener('error', close)
+  return { completion, signal: controller.signal }
+}
 
 // Coalesced loads share their result, but framework hooks may mutate a body.
 // Keep each response independent while preserving nested buffers and undefined.

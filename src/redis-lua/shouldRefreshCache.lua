@@ -9,10 +9,14 @@ local force = tonumber(ARGV[5])  -- Force refresh flag (1 = force, 0 = normal ch
 local lastUpdate = -1
 if force ~= 1 then
     -- Get the last update timestamp
-    lastUpdate = tonumber(redis.call("GET", lastUpdateKey) or "0")
+    local lastUpdateValue = redis.call("GET", lastUpdateKey)
+    local lastUpdateNum = lastUpdateValue and tonumber(lastUpdateValue) or nil
     -- If not forced and the data is still fresh, return "EXISTS"
-    if (currentTime - lastUpdate < refreshThreshold) then
-        return { "EXISTS", refreshThreshold - (currentTime - lastUpdate) }
+    if lastUpdateNum ~= nil then
+        lastUpdate = lastUpdateNum
+        if currentTime - lastUpdate < refreshThreshold then
+            return { "EXISTS", refreshThreshold - (currentTime - lastUpdate) }
+        end
     end
 
     -- Check if another instance is already updating

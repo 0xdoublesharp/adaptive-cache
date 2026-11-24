@@ -5,10 +5,18 @@ import {
   unwrapHttpSourceError,
   UNSHAREABLE_HTTP_RESULT,
 } from './httpLoader'
-import { encodeHttpResponse, decodeHttpResponse, cloneHttpBody, CachedHttpHeaders } from './httpResponse'
+import {
+  encodeHttpResponse,
+  decodeHttpResponse,
+  cloneHttpBody,
+  CachedHttpHeaders,
+  HttpResponseTransport,
+  watchHttpResponse,
+} from './httpResponse'
 import {
   boundedNegativeTTL,
   buildHttpCacheKey,
+  hasCacheableResponseHeaders,
   HttpPolicyOptions,
   HttpResponseLike,
   isCacheableHttpBody,
@@ -38,11 +46,14 @@ export type ExpressRequestLike = {
   header?: (name: string) => unknown
 }
 
-export type ExpressResponseLike = HttpResponseLike & {
-  getHeaders?: () => Record<string, unknown>
-  send: (body: any) => any
-  set: (field: string, value: any) => any
-}
+export type ExpressResponseLike = HttpResponseLike &
+  Partial<HttpResponseTransport> & {
+    getHeaders?: () => Record<string, unknown>
+    send: (body: any) => any
+    set: (field: string, value: any) => any
+    end?: (...args: any[]) => any
+    write?: (...args: any[]) => any
+  }
 
 type ExpressNextFunctionLike = (err?: unknown) => void
 
@@ -106,6 +117,15 @@ const cachedResponseView = (response: ReturnType<typeof decodeHttpResponse>): Ht
   statusCode: response.statusCode || 200,
   getHeader: (name) => response.headers?.[name.toLowerCase()],
 })
+
+const responseHeaders = (res: ExpressResponseLike, contentEncoding: unknown) => {
+  const headers = { ...res.getHeaders?.() }
+  for (const name of Object.keys(headers)) {
+    if (name.toLowerCase() === 'content-encoding') delete headers[name]
+  }
+  if (contentEncoding !== undefined) headers['content-encoding'] = contentEncoding
+  return headers
+}
 
 const captureWriteToken = async (cache: AdaptiveCache): Promise<{ token?: string; writable: boolean }> => {
   if (!cache.supportsWriteFencing()) return { writable: true }
@@ -184,9 +204,14 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
   }
 
   const middleware = async (req: any, res: ExpressResponseLike, next: ExpressNextFunctionLike) => {
-    const { loadOnce, wait, remaining } = createHttpLoader(
+    const method = req.method?.toUpperCase()
+    if (method && method !== 'GET' && !(loader && method === 'HEAD')) return next()
+    const transport =
+      loader && res.prependOnceListener ? watchHttpResponse(res as HttpResponseTransport, res) : undefined
+    const { loadOnce, wait, remaining, signal, expire } = createHttpLoader(
       (context) => loader!(req, context),
       cacheInstance.resolveLoadTimeoutMs(options),
+      transport?.signal,
     )
     const serveBypass = async (diagnostic: 'BYPASS' | 'RETRY' = 'BYPASS') => {
       if (includeHeaders || diagnostic === 'RETRY') res.set('X-Cache', diagnostic)
@@ -197,9 +222,9 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
         return next(unwrapHttpSourceError(error))
       }
     }
-    if (req.method && req.method.toUpperCase() !== 'GET') return next()
     if (owned && closed) return serveBypass()
 
+    const allowsReplay = () => hasCacheableResponseHeaders(res, options.varyBy)
     let requestEligible: boolean
     try {
       requestEligible = isRequestCacheable(req, options)
@@ -207,27 +232,28 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
       cacheInstance.logger.error('adaptiveCache request policy failed:', error)
       return serveBypass('RETRY')
     }
-    if (!requestEligible) {
+    if (!requestEligible || !allowsReplay()) {
       return serveBypass()
     }
 
     const overrideCache = req.query?.refresh === 'true' || forceRefresh
     const originalSend = res.send
+    let sendStarted = false
 
     try {
       const adaptiveCacheKey = requestCacheKey(req)
       if (!adaptiveCacheKey) return serveBypass()
 
       if (loader) {
-        let existing = overrideCache
+        const existing = overrideCache
           ? null
           : await wait(() => cacheInstance.get(adaptiveCacheKey, { allowStale: true }))
         if (existing) {
           const cached = decodeHttpResponse(existing.data)
           if (!responseCacheable(req, cachedResponseView(cached))) {
             await wait(() => cacheInstance.clear(adaptiveCacheKey))
-            existing = null
           } else if (!existing.stale) {
+            if (!allowsReplay()) return serveBypass()
             setHitHeaders(res, includeHeaders, existing)
             if (cached.statusCode) res.statusCode = cached.statusCode
             setCachedHeaders(res, cached.headers)
@@ -236,14 +262,13 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
         }
 
         if (includeHeaders) res.set('X-Cache', overrideCache ? 'BYPASS' : 'MISS')
-        let loadedThisRequest = false
-        let loaderStoreAllowed = true
-        let loaderBodyCacheable = true
+        let background = false
+        let storeAllowed = true
         const loaderResponse = snapshotHttpResponse(res)
         const loadOptions: AdaptiveCacheLoadOptions<unknown> = {
           maxTTL: (data) => {
             const response = decodeHttpResponse(data)
-            const value = cacheInstance.resolveMaxTTL(response.body, { maxTTL: options.maxTTL })
+            const value = cacheInstance.resolveMaxTTL(cloneHttpBody(response.body), { maxTTL: options.maxTTL })
             return response.statusCode === 404 ? boundedNegativeTTL(options.negativeTTL, value) : value
           },
           tags: Array.isArray(tags) ? tags : typeof tags === 'function' ? tags(req) : [],
@@ -254,32 +279,67 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
           forceRefresh: overrideCache,
           lockWaitTimeoutMs: options.lockWaitTimeoutMs,
           loadTimeoutMs: remaining(),
+          signal,
           shouldStore: (data: unknown) =>
-            loaderBodyCacheable &&
-            loaderStoreAllowed &&
+            storeAllowed &&
+            data !== UNSHAREABLE_HTTP_RESULT &&
             responseCacheable(req, cachedResponseView(decodeHttpResponse(data))),
         }
-        const value = await cacheInstance.getOrSet(
-          adaptiveCacheKey,
-          async (context) => {
-            const body = await loadOnce(context)
-            loadedThisRequest = true
-            loaderStoreAllowed = responseCacheable(req, loaderResponse)
-            if (!loaderStoreAllowed) return UNSHAREABLE_HTTP_RESULT
-            loaderBodyCacheable = isCacheableHttpBody(body)
-            if (!loaderBodyCacheable) return UNSHAREABLE_HTTP_RESULT
-            return encodeHttpResponse(
-              cloneHttpBody(body),
-              loaderResponse.statusCode,
-              loaderResponse.getHeader('content-type'),
-              loaderResponse.headers,
+        const value = await wait(() => {
+          if (!allowsReplay()) return Promise.resolve(UNSHAREABLE_HTTP_RESULT)
+          return cacheInstance
+            .getOrSet(
+              adaptiveCacheKey,
+              async (context) => {
+                const body = await loadOnce(context)
+                if (!responseCacheable(req, loaderResponse) || !isCacheableHttpBody(body))
+                  return UNSHAREABLE_HTTP_RESULT
+                const candidate = cloneHttpBody(body)
+                // Core resolves a detached SWR call with stale data before the
+                // refresh can publish. That response belongs to the stale hit.
+                if (!allowsReplay()) return UNSHAREABLE_HTTP_RESULT
+                expire()
+                if (background || signal.aborted) {
+                  // A surviving waiter may use the source after the initiating
+                  // client is gone. Only a completed foreground send or a
+                  // detached refresh can populate the cache.
+                  storeAllowed = background
+                  return encodeHttpResponse(
+                    candidate,
+                    loaderResponse.statusCode,
+                    loaderResponse.getHeader('content-type'),
+                    loaderResponse.headers,
+                  )
+                }
+                const contentEncoding = res.getHeader?.('content-encoding')
+                sendStarted = true
+                try {
+                  res.send(cloneHttpBody(candidate))
+                } catch (error) {
+                  sendStarted = false
+                  throw new HttpSourceError(error)
+                }
+                if (transport && !(await transport.completion)) return UNSHAREABLE_HTTP_RESULT
+                if (!responseCacheable(req, res)) return UNSHAREABLE_HTTP_RESULT
+                return encodeHttpResponse(
+                  candidate,
+                  res.statusCode,
+                  res.getHeader?.('content-type'),
+                  responseHeaders(res, contentEncoding),
+                )
+              },
+              loadOptions,
             )
-          },
-          loadOptions,
-        )
+            .then((value) => {
+              background = true
+              return value
+            })
+        })
+        if (sendStarted) return res
+        if (!allowsReplay()) return serveBypass()
         if (value === UNSHAREABLE_HTTP_RESULT) return res.send(await wait(loadOnce))
         const response = decodeHttpResponse(value)
-        if (!responseCacheable(req, cachedResponseView(response)) && !loadedThisRequest) {
+        if (!responseCacheable(req, cachedResponseView(response))) {
           await wait(() => cacheInstance.clear(adaptiveCacheKey))
           return res.send(await wait(loadOnce))
         }
@@ -289,6 +349,7 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
       }
 
       const result = await wait(() => cacheInstance.get(adaptiveCacheKey))
+      if (!allowsReplay()) return serveBypass()
       let hitFailed = false
       if (result && !overrideCache) {
         try {
@@ -297,7 +358,9 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
             setHitHeaders(res, includeHeaders, result)
             if (response.statusCode) res.statusCode = response.statusCode
             setCachedHeaders(res, response.headers)
-            return res.send(response.body)
+            return result.data?.__adaptiveCacheHttpResponse === 1 && result.data.expressEnd === true
+              ? res.end!(response.body)
+              : res.send(response.body)
           }
         } catch (error) {
           cacheInstance.logger.warn('adaptiveCache failed to fetch data:', error)
@@ -310,21 +373,21 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
       const writeFence = await wait(() => captureWriteToken(cacheInstance))
       if (!writeFence.writable) return next()
 
-      res.send = function (body: any) {
-        res.send = originalSend
-        body = normalizeHttpBody(body)
-        const originalContentEncoding = res.getHeader?.('content-encoding')
-        const sent = originalSend.call(res, body)
-        if (!isCacheableHttpBody(body) || !responseCacheable(req, res)) return sent
-
-        const responseHeaders = { ...res.getHeaders?.() }
-        for (const name of Object.keys(responseHeaders)) {
-          if (name.toLowerCase() === 'content-encoding') delete responseHeaders[name]
+      const capture = (body: unknown, contentEncoding: unknown, expressEnd?: true) => {
+        if (!isCacheableHttpBody(body) || !responseCacheable(req, res)) return
+        const response = {
+          ...encodeHttpResponse(
+            body,
+            res.statusCode,
+            res.getHeader?.('content-type'),
+            responseHeaders(res, contentEncoding),
+          ),
+          ...(expressEnd ? { expressEnd } : {}),
         }
-        if (originalContentEncoding !== undefined) responseHeaders['content-encoding'] = originalContentEncoding
-        const response = encodeHttpResponse(body, res.statusCode, res.getHeader?.('content-type'), responseHeaders)
         const update = async () => {
-          let currentMaxTTL = cacheInstance.resolveMaxTTL(parseJsonBody(body), { maxTTL: options.maxTTL })
+          let currentMaxTTL = cacheInstance.resolveMaxTTL(cloneHttpBody(parseJsonBody(body)), {
+            maxTTL: options.maxTTL,
+          })
           if (typeof options.maxTTL === 'function') cacheInstance.logger.debug('Overriding maxTTL:', currentMaxTTL)
           if (res.statusCode === 404) {
             currentMaxTTL = boundedNegativeTTL(options.negativeTTL, currentMaxTTL) as number
@@ -338,11 +401,45 @@ export const adaptiveExpressCache = <Req extends ExpressRequestLike = ExpressReq
           })
         }
         trackWrite(update().catch((error) => cacheInstance.logger.error('Cache update failed:', error)))
+      }
+
+      let viaSend = false
+      res.send = function (body: any) {
+        res.send = originalSend
+        viaSend = true
+        body = normalizeHttpBody(body)
+        const contentEncoding = res.getHeader?.('content-encoding')
+        const sent = originalSend.call(res, body)
+        capture(body, contentEncoding)
         return sent
+      }
+
+      const { end, write } = res
+      if (end && write) {
+        let streamed = false
+        res.prependOnceListener?.('pipe', () => {
+          streamed = true
+        })
+        res.write = function (...args: any[]) {
+          streamed = true
+          return write.apply(this, args)
+        }
+        res.end = function (chunk: unknown, ...args: any[]) {
+          res.end = end
+          res.write = write
+          const contentEncoding = res.getHeader?.('content-encoding')
+          const ended = end.call(this, chunk, ...args)
+          if (!streamed && !viaSend && (typeof chunk === 'string' || chunk instanceof Uint8Array)) {
+            const body = typeof chunk === 'string' && Buffer.isEncoding(args[0]) ? Buffer.from(chunk, args[0]) : chunk
+            capture(body, contentEncoding, true)
+          }
+          return ended
+        }
       }
 
       return next()
     } catch (error) {
+      if (sendStarted) return res
       if (loader && (error instanceof HttpSourceError || isHttpLoadCancellation(error)))
         return next(unwrapHttpSourceError(error))
       cacheInstance.logger.error('adaptiveCache failed:', error)

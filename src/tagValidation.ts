@@ -1,3 +1,5 @@
+/// <reference lib="es2024.string" />
+
 const MAX_TAGS = 1024
 const MAX_TAG_BYTES = 4096
 const MAX_TAG_PAYLOAD_BYTES = 256 * 1024
@@ -9,6 +11,7 @@ export const normalizeCacheTags = (tags: unknown, operation: string) => {
   for (const tag of unique) {
     if (typeof tag !== 'string') throw new TypeError(`${operation} tags must be strings`)
     if (tag.length === 0) throw new RangeError(`${operation} tags must be non-empty`)
+    if (!tag.isWellFormed()) throw new RangeError(`${operation} tags must contain well-formed Unicode`)
     if (Buffer.byteLength(tag, 'utf8') > MAX_TAG_BYTES)
       throw new RangeError(`${operation} tags must not exceed ${MAX_TAG_BYTES} bytes`)
   }
